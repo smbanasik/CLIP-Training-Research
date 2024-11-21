@@ -1,0 +1,231 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2023}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+\usepackage{amsmath}
+\usepackage[ruled, noend]{algorithm2e}
+\usepackage{listings}
+
+\definecolor{commentcolor}{RGB}{110,154,155}   % define comment color
+\newcommand{\PyComment}[1]{\ttfamily\textcolor{commentcolor}{\# #1}}  % add a "#" before the input text "#1"
+\newcommand{\PyCode}[1]{\ttfamily\textcolor{black}{#1}} % \ttfamily is the code font
+\newlength\myindent
+\setlength\myindent{2em}
+\newcommand\bindent{%
+  \begingroup
+  \setlength{\itemindent}{\myindent}
+  \addtolength{\algorithmicindent}{\myindent}
+}
+\newcommand\eindent{\endgroup}
+% https://discuss.pytorch.org/t/writing-pytorch-style-pseudocode/122450/2
+% https://tex.stackexchange.com/questions/69728/indenting-lines-of-code-in-algorithm
+\definecolor{codegreen}{rgb}{0.313, 0.498, 0.498} %{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    %backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\LinesNumbered
+
+\title{Improving CLIP Training}
+
+\author{Fall 2024: Deep Learning Course Project Description}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+In this project, we will have a competition to solve a challenging problem, namely optimizing global contrastive loss for bimodal contrastive self-supervised learning.
+
+Self-supervised learning (SSL) for pre-training deep neural networks has emerged to be a popular paradigm to learn data representations that generalize across downstream tasks. It has demonstrated effectiveness in multiple areas, including Natural Language Processing \cite{mikolov2013efficient,devlin2018bert,lan2019albert} and Computer Vision \cite{dosovitskiy2020image,zhu2020deformable,liu2021swin}. A simple yet effective framework of SSL is Contrastive Learning (CL), which has laid the foundation for state-of-the-art SSL models due to its effectiveness \cite{chen2020simple,he2020momentum,ReLiCv2,huang2022contrastive}. CL aims to push the similarity scores between ``positive" pairs (e.g., augmented views of the same image) to be higher than that between ``negative" pairs (e.g., augmented views from different images), which has great promises in leveraging large amount of unlabelled data \citep{goyal2021self,radford2021learning}. Moreover, CL has been extended to a broader scope, e.g., bimodal image-text SSL \citep{zhang2020contrastive,radford2021learning}, where images and language text descriptions can be regarded as multi-modal views of the same underlying concept. The well-known CLIP \citep{radford2021learning} method shows that models learned from millions of image-text pairs can attain impressive recognition performance for a wide range of visual understanding tasks.
+
+While the great performance of CLIP and its alternatives have been demonstrated on popular benchmarks, contrastive self-supervised learning for large-scale bimodal image-text SSL remain a challenging problem due to slow convergence and other issues. In this project, you are asked to propose your solutions to accelerate the optimization of global contrastive loss, and to make the learned model have better performance.
+
+\section{Global Contrastive Loss and SogCLR}
+
+In \cite{yuan2022provable}, we have proposed a global contrastive loss (GCL). Below, we first introduce GCL and then talk about SogCLR for optimizing it.
+
+\textbf{Notations}: Let \(\mathcal{D}= \{ (x_1, z_1), \ldots, (x_n, z_n)\}\) be a dataset of \(n\) image-text pairs, where \(x_i\) denotes an image and \(z_i\) denotes it corresponding text. Let \(w\) denote the parameters of an image encoder and a text encoder jointly, which are the parameters that need to be optimized. Let \(h_i(w)\) denote the (normalized) output image feature vector by feeding image \(x_i\) to the image encoder, and \(e_i(w)\) denote the (normalized) output text feature vector by feeding text \(z_i\) to the text encoder.
+
+\textbf{Task}: Train an image and text encoder \(w\) using the training dataset \(\mathcal{D}\).
+
+\subsection{CLIP}
+The original CLIP model was trianed by minimizing mini-batch based contrastive loss. 
+Denote by  $\ell_1(x_i, z_j; \tau):= \exp(\frac{h_i(w)^Te_j(w)- h_i(w)^Te_i(w)}{\tau})$, and  $\ell_2(z_i, x_j; \tau):= \exp(\frac{e_i(w)^Th_j(w)- e_i(w)^Th_i(w)}{\tau})$. 
+where \(\tau> 0\) is the temperature parameter. The original method of CLIP is to update the model according to the gradient of a  mini-batch  contrastive loss that is defined over sampled mini-batch data. To this end, a random mini-batch of \(m\) image-text pairs \(\mathcal{B}= \{ (x_1, z_1), \ldots, (x_B, z_B)\}\) are first sampled. For each image-text pair $(x_i, z_i)$, the mini-batch contrastive loss is defined below: 
+\begin{equation*}
+  L(w, \tau, x_i, z_i,  \mathcal{B})= \log \left(\frac{1}{|\mathcal B_i|}\sum_{z_j\in \mathcal{B}_i} \ell_1(x_i, z_j; \tau)\right)+  \log \left(\frac{1}{|\mathcal B_i|}\sum_{x_j\in \mathcal{B}_i} \ell_2(z_i, x_j; \tau)\right).
+\end{equation*}
+This loss contrasts the similarity score between corresponding image-text pairs \((x_i, z_i)\) and non-corresponding image-text pairs \((x_i, z_j)\) and \((z_i, x_j)\) in the same batch. Then the gradient w.r.t. \(w\) is computed based on the following local contrastive loss for each image-text pairs. 
+\begin{equation*}
+  L(w, \tau, \mathcal{B}):= \frac{1}{m} \sum_{x_i\in \mathcal{B}} L(w, \tau, x_i, \mathcal{B}).
+\end{equation*}
+In the original method of CLIP training, the temperature $\tau$ is also treated as a parameter and optimized in the same way as $w$. 
+
+\subsection{A Global Contrastive Objective}
+
+The local contrastive loss defined over the mini-batch samples hides the complexity for contrastive learning, which renders CLIP sensitive to the mini-batch size. To address this issue, we have proposed a global contrastive objective in \cite{yuan2022provable}.
+\begin{align*}
+  &L_1(w, \tau, x_i, \mathcal{D})= \tau\log\bigg(\varepsilon + \underbrace{\frac{1}{|\mathcal T_i^-|} \sum_{z_j\in \mathcal{T}_i^-} \ell_1(x_i, z_j; \tau)}_{g_1(w, x_i, \mathcal{D})}\bigg)\\
+  &L_2(w, \tau, z_i, \mathcal{D})= \tau\log \bigg(\varepsilon + \underbrace{\frac{1}{|\mathcal I_i^-|}\sum_{x_j\in \mathcal{I}_i^-} \ell_2(z_i, x_j; \tau)}_{g_2(w, z_i, \mathcal{D})}\bigg),
+\end{align*}
+where $\varepsilon$ is a hyperparameter introduced to increase the generalization,  \(\mathcal{T}_i^-:= \{( z_j): j\neq i\}\) denotes negative texts of image $x_i$ and \(\mathcal{I}_i^-:= \{(x_j): j\neq i\}\) denotes negative images of text $z_i$ . Different from CLIP which contrasts image-text pairs within the same \textbf{batch}, the above loss contrasts image-text pairs within the \textbf{whole dataset}. Based on this loss, the following \textbf{global contrastive objective (GCO)} is proposed
+\begin{equation}\label{eq:gcl}
+  L(w,\tau,  \mathcal{D}):= \frac{1}{n} \sum_{x_i\in \mathcal{D}} L_1(w, x_i, \mathcal{D})+ \frac{1}{n} \sum_{z_i\in \mathcal{D}} L_2(w, z_i, \mathcal{D}).
+\end{equation}
+
+%To optimize \({L}(w, \mathcal{D})\) which requires computation on a large-scale dataset, we can first sample a mini-batch of \((x_i, z_i)\) to form the mini-batch loss
+%\begin{equation*}
+%  \hat{L}(w, \mathcal{B})= \frac{\tau}{m} \sum_{x_i\in \mathcal{B}} \log (g_1(w, x_i, \mathcal{D})) + \frac{\tau}{m} \sum_{z_i\in \mathcal{B}} \log (g_2(w, z_i, \mathcal{D})).
+%\end{equation*}
+
+
+\subsection{SogCLR, iSogCLR}
+Below, we introduce two methods that we developed for improving the training of CLIP models with a small mini-batch size.  To address the large batch-size issue of CLIP, we have proposed a memory-efficient stochastic algorithm for \eqref{eq:gcl} without suffering from a large optimization error depending on the batch size. The key idea of SogCLR is the introduction of the following two moving average sequences
+\begin{equation}  \label{eq:sogclr_u}
+  \begin{aligned}
+    u_{1, i, t}=& (1- \gamma) u_{1, i, t- 1}+ \gamma g_1(w_t, x_i, \mathcal{B}^{-}_{1t}), \\
+    u_{2, i, t}=& (1- \gamma) u_{2, i, t- 1}+ \gamma g_2(w_t, z_i, \mathcal{B}^{-}_{2t}).
+  \end{aligned}
+\end{equation}
+where $\mathcal B_t$ is the mini-batch, $\mathcal{B}^{-}_{1t}$ and $\mathcal{B}^{-}_{2t}$ denote the negative texts and images for $x_i$ and $z_i$ in the mini-batch, respectively. Then, we update the parameters with the following gradient estimator
+\begin{equation}  \label{eq:sogclr_grad}
+  G_t= \frac{\tau}{m} \sum_{x_i\in \mathcal{B}_t} \frac{1}{\varepsilon + u_{1, i, t}} \cdot \nabla g_1(w_t, x_i, \mathcal{B}_t) + \frac{\tau}{m} \sum_{z_i\in \mathcal{B}} \frac{1}{\varepsilon + u_{2, i, t}} \cdot \nabla g_2(w_t, z_i, \mathcal{B}_t).
+\end{equation}
+Finally, we can update the model parameters \(w_{t+ 1}\) by using any optimizer (e.g., Adam-W). The detailed steps are summarized in Algorithm \ref{alg:sogclr}, which is referred as SogCLR to emphasize that we aim to optimize the global contrastive objective. The pseudocode is provided in Algorithm \ref{alg:pytorch_sigclr} For motivation and analysis of the algorithm, please refer to \cite{yuan2022provable}.
+
+\begin{algorithm}[H]
+  \caption{SogCLR}
+  \label{alg:sogclr}
+  \textbf{Input}: \(w_0\in \mathbb{R}^d, u_0\in \mathbb{R}^n\)\;
+  \For {\(t= 1, \ldots, T\)} {
+    Draw a batch of \(m\) image-text pairs denoted by \(\mathcal{B}_t= \{ (x_i, z_i)\}_{i= 1}^m\)\;
+    \For {\((x_i, z_i)\in \mathcal{B}_t\)} {
+      Compute \(g_1(w, x_i, \mathcal{B}_{1t}^-)\) and \(g_2(w, z_i, \mathcal{B}_{2t}^-)\)\;
+      Update \(u_{1, i, t}\) and \(u_{2, i, t}\) according to \eqref{eq:sogclr_u}\;
+    }
+    Compute the gradient estimator \(G_t\) according to \eqref{eq:sogclr_grad}\;
+    Update \(v_t= (1- \beta)v_{t- 1}+ \beta G_t\)\;
+    Update \(w_{t+ 1}= w_t- \eta v_t\) (or use Adam-style update)\;
+  }
+\end{algorithm}
+
+\begin{algorithm}[t]
+  \caption{PyTorch-style Pseudocode for SogCLR}
+  \label{alg:pytorch_sigclr}
+  \begin{lstlisting}[language=Python]
+# model1 and model2: image encoder and text encoder respectively
+# tau: temperature
+# n: data size
+# idx: indices for image-text pairs in mini-batch
+# u1, u2: 1d tensors with shape (n,1) by zero initialization
+# gamma: parameter for maintaining moving averages of u1 and u2
+
+# dynamic contrastive loss (mini-batch)
+def dcl(feat1, feat2):
+    m = feat1.shape[0]
+    sim_neg = matmul(feat1, feat2.T)
+    sim_pos = sum(mul(feat1, feat2))
+    sim_diff = sim_neg - sim_pos
+    mask = 1 - eye(m)
+    g = sum(exp(sim_diff / tau), dim=-1) / (m - 1)
+    return g
+
+for img, txt, idx in dataloader:
+    h, e = model1(img), model2(txt)
+    loss1 = dcl(h, e)
+    loss2 = dcl(e, h)
+    u1[idx] = (1 - gamma) * u1[idx] + gamma * loss1.detach()
+    u2[idx] = (1 - gamma) * u2[idx] + gamma * loss2.detach()
+    loss = mean(loss1 + loss2)
+    loss.backward()             
+    optimizer.step()
+    \end{lstlisting}
+\end{algorithm}
+
+The iSogCLR algorithm is an improvement of SogCLR by optimizing the temperature parameters. Inspired by distributionally robust optimization, the problem is formulated as 
+\begin{equation}\label{eq:rgcl}
+  \min_{w, \tau_1, \tau_2}\frac{1}{n} \sum_{x_i\in \mathcal{D}} L_1(w, \tau_{i1},  x_i, \mathcal{D})+ \frac{1}{n} \sum_{z_i\in \mathcal{D}} L_2(w, \tau_{i2}, z_i, \mathcal{D}) + \rho\sum_{i=1}^n(\tau_{i1} + \tau_{i2})
+\end{equation}
+where $\tau_1 = (\tau_{11}, \ldots, \tau_{n1})$ and $\tau_2 = (\tau_{12}, \ldots, \tau_{n2})$. 
+
+
+
+
+\section{Requirements}
+
+The goal of this course project is to ask you to develop better algorithms to train CLIP models.   We will fix some parameters in the project:
+\begin{itemize}
+  \item Data: you will use a 100k subset of the Conceptual Captions 3M (CC3M) dataset for training. For validation, you will use the MSCOCO validation dataset and the ImageNet validation dataset, which will be used to evaluate the model's retrieval and zero-shot classification performance respectively. For testing, we will use two different subsets from MSCOCO and ImageNet for retrieval and zero-shot classification. The training and validation datasets will be provided~\footnote{Training and validation datasets: \url{https://drive.google.com/drive/folders/1Wh-X0YHUoJCRdIS2hVFtRC6xU5JToqvz?usp=sharing}. Usage is provided in the codebase.}, while the testing datasets will not be released. Note that you are allowed to do training only on the training dataset, and the use of other external datasets  in the training stage is not allowed.
+  \item Metric: The evaluation metric is the average of Image-to-Text Recall at the position 1, Text-to-Image Recall at the position 1 on the retrieval dataset and the Top 1 Accuracy on the classification dataset. You are expected to select models on the validation datasets. Your submitted model will be evaluated on the testing datasets and ranked accordingly.
+  \item Model: you will use a ResNet-50 \cite{he2016deep} pretrained on ImageNet from timm library \cite{rw2019timm} as the image encoder, and a DistilBERT \cite{sanh2019distilbert} pretrained on BookCorpus \cite{Zhu_2015_ICCV} and English Wikipedia from huggingface library \cite{wolf-etal-2020-transformers} as the text encoder.
+  \item Hyperparameters: training batch size is fixed to 128, and the number of training epochs is fixed to 30.
+\end{itemize}
+
+
+We have provided a code base that implements the SogCLR  and iSogCLR in Pytorch, which is available here \url{https://colab.research.google.com/drive/1FTF-cTcW11Gyrwu8uhTZOXgLsjp49Z9W?usp=sharing}. You are free to make modification to any components and also explore other codebase  (e.g., FastCLIP, TempNet)  as long as you use the same settings as specified above. 
+
+
+\section{Requirement}
+\begin{itemize}
+\item  You need to compare at least 2 different optimizers. 
+
+\item You need to compare at least 3 different loss functions. 
+
+\item In the report, you need to report the performance of your trained models on the provided validation datasets of MS-COCO and ImageNet in terms of averaged recalls and zero-shot classification  
+
+\item You are asked to submit your code for training and your trained model so that we can load your model for evaluation.
+
+\end{itemize}
+
+\paragraph{Grading} We will evaluate the model by the zero-shot top-1 accuracy on the testing classification dataset and image-to-text retrieval and text-to-image retrieval performance by using recall@1 on the testing retrieval dataset. Finally, we will use the average performance to rank different groups. The top $6$ groups will get a certificate (1st, 2nd, 3rd, 3 honoral mentions). We will use the following criteria for grading:
+\begin{itemize}
+\item Breadth of experimental comparison (30’) 
+\item Writing of report  (45’) 
+\item Presentation (25’) 
+\item Novelty of your ideas (+10’) 
+\end{itemize}
+We will follow the timeline below: 
+% How is the model's performance evaluated? The model's performance is evaluated on the retrieval task. Consider we have a dataset of image-text pairs \(\mathcal{V}= \{ (x_1, z_1), \ldots, (x_p, z_p)\}\). For each image \(x_i\), we can compute its similarity with all the texts \(z_j, j= 1, \ldots, p\). The text recall@k is then defined as the portion of images \(x_i\) such that \(\mathrm{sim}(x_i, z_i)\) is ranked within top k positions in \(\{ \mathrm{sim}(x_i, z_j)\}_{j= 1}^p\), where \(\mathrm{sim}\) denotes the similarity between an image and a text. Similarly, image recall@k can be computed.
+
+\begin{itemize}
+  \item Nov. 12 (11:59 p.m.): team construction (send an email to the TA with team members' name).
+  \item Dec. 3 (11:59 p.m.) : Project Presentation (upload a 10-minutes video).
+  \item Dec. 6 (11:59 p.m.): Final Project Report (5 + pages), including abtract, introduction, related work, proposed work, experiments with detailed results, and conclusion. You can use the provided latex template. If you use word, please use the font size of 11pt and 1 inch margin at all sides. In the final report, every team should include a description of team members' contribution. If any team member's contribution is not clearly described, he/she will get a zero score. 
+\end{itemize}
+
+\bibliographystyle{plain}
+\bibliography{main}
+
+\end{document}
