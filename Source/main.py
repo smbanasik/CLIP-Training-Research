@@ -1,21 +1,11 @@
-from libauc.losses import AUCMLoss, CrossEntropyLoss, APLoss
-from libauc.optimizers import PESG, Adam, SOAP
-from libauc.models import resnet18 as ResNet18
-from libauc.sampler import DualSampler
-from libauc.metrics import auc_roc_score, auc_prc_score
-
-from medmnist import PneumoniaMNIST
 import torch
 import numpy as np
 from PIL import Image
 import torch.nn as nn
 import torchvision.transforms as transforms
-from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import roc_auc_score
 import matplotlib.pyplot as plt
 
-from data_process import load_data, ImageDataset, ImageDataset_APLoss
-from our_model import Model_Default, Model_AUPRC, Model_AUROC
+from data_process import generate_loaders
 
 def plot_save(train_log, test_log, title, ylabel, filename):
     plt.rcParams["figure.figsize"] = (9,5)
@@ -49,16 +39,16 @@ class HyperParams():
         self.learn_rates = [0.0005, 0.001, 0.002]
         self.learn_rates_pesg = [0.02, 0.05, 0.1]
         self.lr_decay = 0.1
-        self.lr_epoch = 9
-        self.batch_size = 64
+        self.lr_epoch = 30
+        self.batch_size = 128
         self.weight_decay = 0
         self.gammas = [0.2, 0.5, 0.8]
-        self.decay_epochs = [9]
+        self.decay_epochs = []
 
 def main():
 
     parameters = HyperParams()
-    sampler, trainloader, evalloader, testloader = load_data(paramaters)
+    train_loader, coco_loader, imagenet_loader = generate_loaders(parameters)
 
     best_lr = [0, 0]
     for learn_rate in parameters.learn_rates:

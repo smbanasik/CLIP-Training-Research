@@ -1,92 +1,192 @@
-def getDataFromSet(dataset):
-    images = []
-    targets = []
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
 
-    for img, targ in dataset:
-        images.append(img)
-        targets.append(targ)
+from timm.data import resolve_data_config
+from timm.data.transforms_factory import create_transform
 
-    return np.array(images), np.array(targets)
+from torchvision import datasets
 
-class ImageDataset(Dataset):
-    def __init__(self, images, targets, image_size=28, crop_size=24, mode='train'):
-        self.images = images.astype(np.uint8)
-        self.targets = targets
-        self.mode = mode
-        self.transform_train = transforms.Compose([
-                                transforms.ToTensor(),
-                                transforms.RandomCrop((crop_size, crop_size), padding=None),
-                                transforms.RandomHorizontalFlip(),
-                                transforms.Resize((image_size, image_size)),
-                                ])
-        self.transform_test = transforms.Compose([
-                                transforms.ToTensor(),
-                                transforms.Resize((image_size, image_size))
-                                ])
-    def __len__(self):
-        return len(self.images)
-    def __getitem__(self, idx):
-        image = self.images[idx]
-        target = self.targets[idx]
-        image = Image.fromarray(image.astype('uint8'))
-        if self.mode == 'train':
-            image = self.transform_train(image)
+import json 
+import os 
+
+# CC3M Training Dataset
+class CC3MDataset(Dataset):
+    def __init__(self, captions_file, img_root_dir, transform=None, tokenizer=None):
+        """
+        Args:
+            captions_file (str): Path to the captions JSON file.
+            root_dir (str): Path to the root directory of the images.
+            tokenizer (callable, optional): Tokenizer for caption data
+        """
+
+        self.img_root_dir = img_root_dir
+
+        if transform:
+            self.transform = transform 
         else:
-            image = self.transform_test(image)
-        return image, target
+            # Use timm's transformations instead of torch.compose, since they're targeted to ResNet50
+            config = resolve_data_config({}, model='resnet50')
+            self.transform  = create_transform(**config)        
+        
+        self.tokenizer = tokenizer
 
-class ImageDataset_APLoss(Dataset):
-    def __init__(self, images, targets, image_size=28, crop_size=24, mode='train'):
-        self.images = images.astype(np.uint8)
-        self.targets = targets
-        self.mode = mode
-        self.transform_train = transforms.Compose([
-                                transforms.ToTensor(),
-                                transforms.RandomCrop((crop_size, crop_size), padding=None),
-                                transforms.RandomHorizontalFlip(),
-                                transforms.Resize((image_size, image_size)),
-                                ])
-        self.transform_test = transforms.Compose([
-                                transforms.ToTensor(),
-                                transforms.Resize((image_size, image_size))
-                                ])
-        # "For loss function"
-        self.pos_indices = np.flatnonzero(targets==1)
-        self.pos_index_map = {}
-        for i, idx in enumerate(self.pos_indices):
-            self.pos_index_map[idx] = i
+        # Load captions and image paths from the JSON file
+        with open(captions_file, 'r') as f:
+            self.data = json.load(f)
+
     def __len__(self):
-        return len(self.images)
+        return len(self.data)
+
     def __getitem__(self, idx):
-        image = self.images[idx]
-        target = self.targets[idx]
-        image = Image.fromarray(image.astype('uint8'))
-        if self.mode == 'train':
-            idx = self.pos_index_map[idx] if idx in self.pos_indices else -1
-            image = self.transform_train(image)
+        """
+        Fetch a single data sample (image and caption) based on index.
+        """
+
+        sample = self.data[idx]
+
+        # Load image
+        img_path = os.path.join(self.img_root_dir, sample['image'])
+        image = Image.open(img_path).convert('RGB')
+
+        # Apply image transformation if provided
+        if self.transform:
+            image = self.transform(image)
+
+        # Process caption (tokenize if tokenizer is provided)
+        caption = sample['caption']
+        if self.tokenizer:
+            caption = self.tokenizer(caption)
+
+        return image, caption
+
+# MS-COCO Validation Dataset for recall
+class MSCOCODataset(Dataset):
+    def __init__(self, captions_file, img_root_dir, transform=None, tokenizer=None):
+        """
+        Args:
+            captions_file (str): Path to the captions JSON file.
+            root_dir (str): Path to the root directory of the images.
+            tokenizer (callable, optional): Tokenizer for caption data
+        """
+
+        self.img_root_dir = img_root_dir
+
+        if transform:
+            self.transform = transform 
         else:
-            image = self.transform_test(image)
-        return idx, image, target
+            # Use timm's transformations instead of torch.compose, since they're targeted to ResNet50
+            config = resolve_data_config({}, model='resnet50')
+            self.transform  = create_transform(**config)        
+        
+        self.tokenizer = tokenizer
+
+        # Load captions and image paths from the JSON file
+        with open(captions_file, 'r') as f:
+            raw_coco_data = json.load(f)
+            images = {img['id']: img['file_name'] for img in raw_coco_data['images']}
+            data = []
+            for ann in raw_coco_data['annotations']:
+                if ann['image_id'] in images:
+                    data.append({'image': images[ann['image_id']], 'caption': ann['caption']})
+            self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        """
+        Fetch a single data sample (image and caption) based on index.
+        """
+
+        sample = self.data[idx]
+
+        # Load image
+        img_path = os.path.join(self.img_root_dir, sample['image'])
+        image = Image.open(img_path).convert('RGB')
+
+        # Apply image transformation if provided
+        if self.transform:
+            image = self.transform(image)
+
+        # Process caption (tokenize if tokenizer is provided)
+        caption = sample['caption']
+        if self.tokenizer:
+            caption = self.tokenizer(caption)
+
+        return image, caption
+
+# ImageNet Validation Dataset for zero-shot predictions
+class ImageNetDataset(Dataset):
+    def __init__(self, img_root_dir, captions_file, transform=None):   
+        """
+        Args:
+            img_root_dir (str): Path to the root directory of the images.
+            captions_file (str): Path to the JSON file containing the ImageNet class index.
+            transform (callable, optional): Transform to be applied to images.
+        """
+        self.img_root_dir = img_root_dir
+        if transform:
+            self.transform = transform 
+        else:
+            # Use timm's transformations instead of torch.compose, since they're targeted to ResNet50
+            config = resolve_data_config({}, model='resnet50')
+            self.transform  = create_transform(**config)     
+
+        # Each directory in the ImageNet folder represents a class
+        # These aren't human-readable, but the imagenet_class_index JSON file maps them to real world objects
+        with open(captions_file, 'r') as f:
+            self.class_index = json.load(f)
+        
+        # Convert to a format: {class_id: (imagenet_id, description)}
+        idx_to_class = {int(k): v[1] for k, v in self.class_index.items()}
+
+        dataset = datasets.ImageFolder(root=img_root_dir)
+        self.data = []
+
+        # Store image paths and their corresponding descriptions
+        for path, label in dataset.samples:
+            # Get the human-readable class name for the label
+            class_description = idx_to_class[label]
+            self.data.append({'image': path, 'description': class_description})
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sample = self.data[idx]
+
+        # Load image
+        img_path = sample['image']
+        image = Image.open(img_path).convert('RGB')
+
+        # Apply image transformation if provided
+        if self.transform:
+            image = self.transform(image)
+
+        # Return image and corresponding class description
+        description = sample['description']
+        return image, description
+
+# Create DataLoader objects for the three datasets
+def generate_loaders(parameters):
+    CC3M_CAPTION_FILE = '../clip_train/cc3m_train_subset.json'
+    CC3M_IMG_ROOT = '../Datasets/cc3m_subset_100k'
+    train = CC3MDataset(CC3M_CAPTION_FILE, CC3M_IMG_ROOT)
+
+    COCO_CAPTION_FILE = '../Datasets/mscoco_val/filtered_captions_val2014.json'
+    COCO_IMG_ROOT = '../Datasets/mscoco_val/mscoco_val2014_subset_5k'
+    coco_valid = MSCOCODataset(COCO_CAPTION_FILE, COCO_IMG_ROOT)
+
+    # NOTE: Run the shell script within imagenet first to get the val100 folder
+    IMAGENET_IMG_ROOT = '../Datasets/imagenet/val100'
+    IMAGENET_CAPTION_FILE = '../Datasets/imagenet/imagenet_class_index.json'
+    imagenet_valid = ImageNetDataset(IMAGENET_IMG_ROOT, IMAGENET_CAPTION_FILE)
+
+    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False)
+    coco_loader = DataLoader(coco_valid, batch_size=parameters.batch_size, shuffle=False)
+    imagenet_loader = DataLoader(imagenet_valid, batch_size=parameters.batch_size, shuffle=False)
+
+    return train_loader, coco_loader, imagenet_loader
 
 
-def load_data(paramaters):
-    # Load the Data
-    train_dataset = PneumoniaMNIST(split="train", download=False)
-    eval_dataset = PneumoniaMNIST(split="val")
-    eval_dataset = PneumoniaMNIST(split="test")
 
-    tr_imgs, tr_labels = getDataFromSet(train_dataset)
-    e_imgs, e_labels = getDataFromSet(eval_dataset)
-    te_imgs, te_labels = getDataFromSet(train_dataset)
-
-    # Augment data
-    train_dataset = ImageDataset(tr_imgs, tr_labels)
-    eval_dataset = ImageDataset(e_imgs, e_labels)
-    test_dataset = ImageDataset(te_imgs, te_labels)
-
-    sampler = DualSampler(train_dataset, parameters.batch_size, sampling_rate=0.2)
-    trainloader = DataLoader(train_dataset, batch_size=parameters.batch_size, sampler=sampler, num_workers=2)
-    evalloader = DataLoader(eval_dataset, batch_size=parameters.batch_size, shuffle=False, num_workers=2)
-    testloader = torch.utils.data.DataLoader(test_dataset, batch_size=parameters.batch_size, shuffle=False, num_workers=2)
-
-    return sampler, trainloader, evalloader, testloader
