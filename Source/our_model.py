@@ -209,8 +209,6 @@ class CLIP(nn.Module):
 
         return loss_ita, info_dict
 
-
-
 @torch.no_grad()
 def concat_all_gather(tensor):
     """

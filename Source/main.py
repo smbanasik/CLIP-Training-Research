@@ -14,7 +14,11 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms, datasets
 
+from torch.optim import AdamW, Adam
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from data_process import generate_loaders
+from our_model import CLIP_Model
+from losses import SogCLR_Loss
 
 import pipeline as pipe
 import our_model as our
@@ -108,6 +112,8 @@ class HyperParamsAndArgs():
         self.learnable_temp = True
         self.personalized_tau = True
         self.isogclr_temp_net = True
+
+# Removed optimizer constructor in place of my own. Once we confirm it works we can reimplement. We can find it in previous commits
 
 if __name__ == '__main__':
     params = HyperParamsAndArgs()
