@@ -124,71 +124,49 @@ def evaluate_top1_classification(model, imagenet_loader, device):
     return correct / total
 
 @torch.no_grad()
-def evaluation(model, data_loader, tokenizer, device, args):
-    # test
-    model.eval() 
-    
-    metric_logger = utils.MetricLogger(delimiter="  ")
-    header = 'Evaluation:'    
-    
-    print('Computing features for evaluation...')
-    start_time = time.time()  
-
-    texts = data_loader.dataset.text   
-    num_text = len(texts)
-    text_bs = 256
-    text_embeds = []
-    for i in range(0, num_text, text_bs):
-        text = texts[i: min(num_text, i+text_bs)]
-        text_input = tokenizer(text, padding='max_length', truncation=True, max_length=30, return_tensors="pt").to(device) 
-        text_output = model.text_encoder(text_input.input_ids, attention_mask=text_input.attention_mask, output_hidden_states=False)  
-        text_embed = F.normalize(model.text_proj(text_output.last_hidden_state[:,0,:]), dim=-1)
-        text_embeds.append(text_embed)
-    text_embeds = torch.cat(text_embeds,dim=0)
-    
-    image_embeds = []
-    for image, img_id in data_loader: 
-        image = image.to(device) 
-        image_feat = model.visual_encoder(image)        
-        image_embed = model.vision_proj(image_feat)            
-        image_embed = F.normalize(image_embed, dim=-1)      
-        image_embeds.append(image_embed)
-    image_embeds = torch.cat(image_embeds,dim=0)
-    
-    sims_matrix = image_embeds.to(device) @ text_embeds.to(device).t()
-    score_matrix_i2t = torch.full((len(data_loader.dataset.image),len(texts)),-100.0).to(device)
-    
-    num_tasks = utils.get_world_size()
-    rank = utils.get_rank() 
-    step = sims_matrix.size(0)//num_tasks + 1
-    start = rank*step
-    end = min(sims_matrix.size(0),start+step)
-
-    for i,sims in enumerate(sims_matrix[start:end]): 
-        topk_sim, topk_idx = sims.topk(k=args.k_test, dim=0)
-        score_matrix_i2t[start+i, topk_idx] = topk_sim
+def evaluate_image_and_text(model, coco_loader, device):
+    """
+    Evaluate both Image-to-Text and Text-to-Image R@1 in a single pass through coco_loader.
+    """
+    image_features = []
+    text_features = []
+    for images, captions in coco_loader:
+        # Move data to the correct device
+        images = images.to(device)
+        input_ids = captions['input_ids'].to(device)
+        attention_mask = captions['attention_mask'].to(device)
         
-    sims_matrix = sims_matrix.t()
-    score_matrix_t2i = torch.full((len(texts),len(data_loader.dataset.image)),-100.0).to(device)
+        with torch.no_grad():
+            # Extract and normalize image features
+            img_feats = model.image_proj(model.visual_encoder(images))
+            img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+            image_features.append(img_feats)
+            
+            # Extract and normalize text features
+            text_rep = model.text_encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state[:, 0]
+            txt_feats = model.text_proj(text_rep)
+            txt_feats = txt_feats / txt_feats.norm(dim=-1, keepdim=True)
+            text_features.append(txt_feats)
     
-    step = sims_matrix.size(0)//num_tasks + 1
-    start = rank*step
-    end = min(sims_matrix.size(0),start+step)    
-    
-    for i,sims in enumerate(sims_matrix[start:end]): 
-        topk_sim, topk_idx = sims.topk(k=args.k_test, dim=0)
-        score_matrix_t2i[start+i, topk_idx] = topk_sim
+    # Concatenate features
+    image_features = torch.cat(image_features, dim=0)
+    text_features = torch.cat(text_features, dim=0)
 
-    if args.distributed:
-        dist.barrier()   
-        torch.distributed.all_reduce(score_matrix_i2t, op=torch.distributed.ReduceOp.SUM) 
-        torch.distributed.all_reduce(score_matrix_t2i, op=torch.distributed.ReduceOp.SUM)        
-        
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Evaluation time {}'.format(total_time_str)) 
+    # Compute similarity matrices
+    similarity_matrix = F.cosine_similarity(image_features.unsqueeze(1), text_features.unsqueeze(0), dim=-1)
 
-    return score_matrix_i2t.cpu().numpy(), score_matrix_t2i.cpu().numpy()
+    # Image-to-Text R@1
+    img_to_text_top_indices = similarity_matrix.argmax(dim=1)
+    img_to_text_correct = sum(idx == i for i, idx in enumerate(img_to_text_top_indices))
+    img_to_text_r1 = img_to_text_correct / len(image_features)
+
+    # Text-to-Image R@1
+    text_to_img_top_indices = similarity_matrix.argmax(dim=0)
+    text_to_img_correct = sum(idx == i for i, idx in enumerate(text_to_img_top_indices))
+    text_to_img_r1 = text_to_img_correct / len(text_features)
+
+    return img_to_text_r1, text_to_img_r1
+
 
 
             

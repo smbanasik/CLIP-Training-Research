@@ -83,7 +83,7 @@ class HyperParamsAndArgs():
         
         self.loss_type = "sogclr"
         self.optimizer = "adamw"
-        self.schedular = "cosine"
+        self.scheduler = "cosine"
 
         self.is_evaluating = False
         self.is_training = True

@@ -170,10 +170,10 @@ def generate_loaders(parameters):
     # NOTE: I'm assuming we want this consistent across datasets
     tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
 
-    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False, num_workers=1, pin_memory=True, collate_fn=collate_fn_with_index(batch, train.transform, tokenizer))
+    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False, num_workers=1, pin_memory=True, collate_fn=lambda batch: collate_fn_with_index(batch, train.transform, tokenizer))
     coco_loader = DataLoader(coco_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=1, pin_memory=True, collate_fn=lambda batch: collate_fn(batch, coco_valid.transform, tokenizer))
     # No captions, use torch's default collate_fn
-    imagenet_loader = DataLoader(imagenet_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    imagenet_loader = DataLoader(imagenet_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=1, pin_memory=True)
 
     return train_loader, coco_loader, imagenet_loader
 
