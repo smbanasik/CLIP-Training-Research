@@ -119,6 +119,8 @@ class ImageNetDataset(Dataset):
         # Store image paths and their corresponding descriptions
         for path, label in dataset.samples:
             # Get the human-readable class name for the label
+            if label not in idx_to_class:
+                continue
             class_description = idx_to_class[label]
             self.data.append({'image': path, 'description': class_description})
 
@@ -154,17 +156,17 @@ def collate_fn_with_index(batch, image_transform, tokenizer):
 
 # Create DataLoader objects for the three datasets
 def generate_loaders(parameters):
-    CC3M_CAPTION_FILE = '../clip_train/cc3m_train_subset.json'
-    CC3M_IMG_ROOT = '../datasets/cc3m_subset_100k'
+    CC3M_CAPTION_FILE = '/content/drive/My Drive/636 Project Data/clip_train/cc3m_train_subset.json'
+    CC3M_IMG_ROOT = '/content/drive/My Drive/636 Project Data/Datasets/cc3m_subset_100k'
     train = CC3MDataset(CC3M_CAPTION_FILE, CC3M_IMG_ROOT)
 
-    COCO_CAPTION_FILE = '../datasets/mscoco_val/captions_val2014.json'
-    COCO_IMG_ROOT = '../datasets/mscoco_val/mscoco_val2014_subset_5k'
+    COCO_CAPTION_FILE = '/content/drive/My Drive/636 Project Data/Datasets/mscoco_val/captions_val2014.json'
+    COCO_IMG_ROOT = '/content/drive/My Drive/636 Project Data/Datasets/mscoco_val/mscoco_val2014_subset_5k'
     coco_valid = MSCOCODataset(COCO_CAPTION_FILE, COCO_IMG_ROOT)
 
     # NOTE: Run the shell script within imagenet first to get the val100 folder
-    IMAGENET_IMG_ROOT = '../datasets/imagenet/val'
-    IMAGENET_CAPTION_FILE = '../datasets/imagenet/imagenet_class_index.json'
+    IMAGENET_IMG_ROOT = '/content/drive/My Drive/636 Project Data/Datasets/imagenet/val'
+    IMAGENET_CAPTION_FILE = '/content/drive/My Drive/636 Project Data/Datasets/imagenet/imagenet_class_index.json'
     imagenet_valid = ImageNetDataset(IMAGENET_IMG_ROOT, IMAGENET_CAPTION_FILE)
 
     # NOTE: I'm assuming we want this consistent across datasets
@@ -176,6 +178,3 @@ def generate_loaders(parameters):
     imagenet_loader = DataLoader(imagenet_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=1, pin_memory=True)
 
     return train_loader, coco_loader, imagenet_loader
-
-
-
