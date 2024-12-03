@@ -1,0 +1,5 @@
+Datasets/
+!imagenet/imagenet_class_index.json
+checkpoints/
+output/
+clip_train/

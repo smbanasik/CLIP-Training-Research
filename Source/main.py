@@ -5,7 +5,11 @@ import torch.nn as nn
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 
+from torch.optim import AdamW, Adam
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from data_process import generate_loaders
+from our_model import CLIP_Model
+from losses import SogCLR_Loss
 
 def plot_save(train_log, test_log, title, ylabel, filename):
     plt.rcParams["figure.figsize"] = (9,5)
@@ -35,95 +39,49 @@ def plot(train_log, test_log, title, ylabel):
 
 class HyperParams():
     def __init__(self):
-        self.epochs = 15
+        self.epochs = 30
         self.learn_rates = [0.0005, 0.001, 0.002]
-        self.learn_rates_pesg = [0.02, 0.05, 0.1]
         self.lr_decay = 0.1
         self.lr_epoch = 30
-        self.batch_size = 128
+        self.batch_size = 32
         self.weight_decay = 0
-        self.gammas = [0.2, 0.5, 0.8]
-        self.decay_epochs = []
+        self.gamma = 0.1
+        self.step_size = 15
+
+# Constructor for the AdamW optimizer
+# Use this instead of clip_model.parameters to allow us to adjust lr/wd for each component
+# The encoders are pretrained and should have a lower learning rate to prevent overshooting
+def get_adamw_optimizer(model, lr=1e-4, weight_decay=1e-2):
+    params = [
+        {'params': model.image_encoder.parameters(), 'lr': lr, 'weight_decay': weight_decay},
+        {'params': model.text_encoder.parameters(), 'lr': lr, 'weight_decay': weight_decay},
+        {'params': model.image_proj.parameters(), 'lr': lr, 'weight_decay': weight_decay},
+        {'params': model.text_proj.parameters(), 'lr': lr, 'weight_decay': weight_decay},
+    ]
+    return AdamW(params)
+
+def get_adam_optimizer(model, lr=1e-4):
+    params = [
+        {'params': model.image_encoder.parameters(), 'lr': lr},
+        {'params': model.text_encoder.parameters(), 'lr': lr},
+        {'params': model.image_proj.parameters(), 'lr': lr},
+        {'params': model.text_proj.parameters(), 'lr': lr},
+    ]
+    return Adam(params)
 
 def main():
-
     parameters = HyperParams()
     train_loader, coco_loader, imagenet_loader = generate_loaders(parameters)
-
-    best_lr = [0, 0]
-    for learn_rate in parameters.learn_rates:
-        model = Model_Default(learn_rate, 0.003)
-
-        print('Begin Training with Learn Rate', learn_rate)
-        print('-'*30)
-
-        train_log = []
-        test_log = []
-
-        test_best = 0
-        train_list_AUPRC, test_list_AUPRC = [], []
-        train_list_AUROC, test_list_AUROC = [], []
-        for epoch in range(parameters.epochs):
-            if epoch in parameters.decay_epochs:
-                model.opt.update_lr(decay_factor=10)
-                pass
-            
-            train_loss = []
-            model.network.train()
-            for data, targets in trainloader:
-                data, targets = data.cuda(), targets.cuda()
-                preds = model.network(data)
-                preds = torch.sigmoid(preds)
-                loss = model.loss_func(preds, targets.float())
-
-                model.opt.zero_grad()
-                loss.backward()
-                model.opt.step()
-                train_loss.append(loss.item())
-            
-            model.network.eval()
-            train_pred_list = []
-            train_true_list = []
-            for train_data, train_targets in evalloader:
-                train_data = train_data.cuda()
-                train_pred = model.network(train_data)
-                train_pred_list.append(train_pred.cpu().detach().numpy())
-                train_true_list.append(train_targets.numpy())
-            train_true = np.concatenate(train_true_list)
-            train_pred = np.concatenate(train_pred_list)
-            train_ap = auc_prc_score(train_true, train_pred)
-            train_list_AUPRC.append(train_ap)
-            train_auc = auc_roc_score(train_true, train_pred)
-            train_list_AUROC.append(train_auc)
-            train_loss = np.mean(train_loss)
-        
-            test_pred_list = []
-            test_true_list = [] 
-            for test_data, test_targets in testloader:
-                test_data = test_data.cuda()
-                test_pred = model.network(test_data)
-                test_pred_list.append(test_pred.cpu().detach().numpy())
-                test_true_list.append(test_targets.numpy())
-            test_true = np.concatenate(test_true_list)
-            test_pred = np.concatenate(test_pred_list)
-            val_ap = auc_prc_score(test_true, test_pred)
-            test_list_AUPRC.append(val_ap)
-            val_auc =  auc_roc_score(test_true, test_pred)
-            test_list_AUROC.append(val_auc)
-            model.network.train()
-            if test_best < val_ap:
-                    test_best = val_ap
-
-            print("epoch: %s, train_loss: %.4f, train_auc: %.4f, test_auc: %.4f, lr: %.4f"%(epoch, train_loss, train_auc, val_auc, model.opt.lr ))    
-            train_log.append(train_auc) 
-            test_log.append(val_auc)
-
-        if(test_best > best_lr[0]):
-            best_lr = [test_best, learn_rate]
-
-        plot(train_list_AUPRC, test_list_AUPRC, "CrossEntropyLoss PneumoniaMNIST - AUPRC", "AUPRC", "crossent_auprc" + "_lr" + str(learn_rate) + ".png")
-        plot(train_list_AUROC, test_list_AUROC, "CrossEntropyLoss PneumoniaMNIST - AUROC", "AUROC", "crossent_auroc" + "_lr" + str(learn_rate) + ".png")
-    print("Best hyper parameters - LR:", best_lr[1])
-
+    clip_model = CLIP_Model()
+    # Loss functions 
+    sog_loss = SogCLR_Loss(len(train_loader))
+    # Optimizers
+    adam_w = get_adamw_optimizer(clip_model, parameters.lr, parameters.weight_decay)
+    adam = get_adam_optimizer(clip_model, parameters.lr)
+    # Scheduler
+    step = StepLR(step_size=parameters.step_size, gamma=parameters.gamma)
+    scores = clip_model.train(train_loader, coco_loader, imagenet_loader, sog_loss, adam_w, step, 5)
+    print(f'scores: {scores}')
+    
 if __name__ == '__main__':
     main()
