@@ -1,139 +1,242 @@
-import timm 
+"""
+    Adapted from: https://github.com/zhqiu/contrastive-learning-iSogCLR/blob/main/
+"""
+from functools import partial
+
+import timm
+from transformers import AutoModel, RobertaModel
+
+from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss
+from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss
+
 import torch
-import torch.cuda
-import torch.nn as nn
-from transformers import DistilBertModel, DistilBertTokenizer
+from torch import nn
 import torch.nn.functional as F
-from losses import SogCLR_Loss
 
-class CLIP_Model():
-    def __init__(self, latent_dim=256):
-        self.device = torch.device('gpu' if torch.cuda.is_available() else 'cpu')
-        self.image_encoder = timm.create_model('resnet50', pretrained=True).to(self.device)
-        self.text_encoder = DistilBertModel.from_pretrained("distilbert-base-uncased", attn_implementation="sdpa")
-        self.tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
-        image_feature_dim = 1000 # ResNet50 output dimension
-        text_feature_dim = 768   # DistilBERT output dimension
+class CLIP(nn.Module):
+    def __init__(self,               
+                 image_encoder = None,
+                 text_encoder = None,
+                 embed_dim = 256,
+                 init_model = True,
+                 world_size = 8,
+                 ita_type = 'clip',
+                 sogclr_gamma = 0.9,
+                 rho_I = 0.1,
+                 rho_T = 0.1,
+                 eta_init = 0.001,
+                 tau_init = 0.01,
+                 eta_sched = None,
+                 eta_exp_gamma = 0.8,
+                 beta_u = 0.9,
+                 temp = 0.01,
+                 learnable_temp = False,
+                 personalized_tau = False,
+                 bsz = 128,
+                 vicreg_sim_coeff = 25.0, 
+                 vicreg_std_coeff = 25.0,
+                 use_temp_net = True,
+                 alpha = 1.0,
+                 distributed=True,
+                 ):
+        super().__init__()
 
-        # Projection Layers
-        self.image_proj = nn.Linear(image_feature_dim, latent_dim).to(self.device)
-        self.text_proj = nn.Linear(text_feature_dim, latent_dim).to(self.device)
+        self.temp = temp
+        self.learnable_temp = learnable_temp
+        self.personalized_tau = personalized_tau
 
-    # Encode images/text in latent space
-    def forward(self, images, texts):
-        image_features = self.image_encoder(images)
-        image_features = self.image_proj(image_features)
-        image_features = F.normalize(image_features, p=2, dim=-1)
+        self.distributed = distributed
 
-        text_features = self.text_encoder(**texts).last_hidden_state[:, 0]
-        text_features = self.text_proj(text_features)
-        text_features = F.normalize(text_features, p=2, dim=-1)
-        
-        return image_features, text_features
+        if self.learnable_temp:
+            if not personalized_tau:
+                self.temp = nn.Parameter(torch.ones([]) * self.temp)
+            else:
+                self.image_temp = nn.Parameter(torch.ones(2900000) * self.temp)
+                self.text_temp = nn.Parameter(torch.ones(2900000) * self.temp)
     
-    def train(self, train_loader, coco_loader, imagenet_loader, loss_fn, opt, sched, max_epochs=30, log_interval=10):
+        self.visual_encoder = timm.create_model(image_encoder, pretrained=init_model)
+        self.visual_encoder.reset_classifier(0)
 
-        self.image_proj.train()
-        self.text_proj.train()
+        if text_encoder == 'roberta-large':
+            self.text_encoder = RobertaModel.from_pretrained(text_encoder)
+            self.text_proj = nn.Linear(1024, embed_dim)
+        else:
+            self.text_encoder = AutoModel.from_pretrained(text_encoder)
+            self.text_proj = nn.Linear(768, embed_dim)
 
-        img_to_text, text_to_image, top_1 = [], [], []
-        need_indices = isinstance(loss_fn, SogCLR_Loss)
+        if not init_model:
+            self.text_encoder.init_weights()
+
+        self.vision_proj = nn.Linear(self.visual_encoder.num_features, embed_dim)   
+
+        self.ita_type = ita_type
+
+        if self.ita_type == 'clip':
+            if not personalized_tau:
+                self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp)
+            else:
+                self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp)
+
+        elif self.ita_type == 'cyclip':
+            self.criterion = CyCLIP_Loss(world_size=world_size, temperature=self.temp)
+
+        elif self.ita_type == 'vicreg':
+            self.criterion = VICReg_Loss(world_size=world_size, dim_size=embed_dim, sim_coeff=vicreg_sim_coeff, std_coeff=vicreg_std_coeff)
+
+        elif self.ita_type == 'sogclr':
+            self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz)
+
+        elif self.ita_type == 'isogclr_new_v2':
+            self.criterion = iSogCLR_New_v2_Loss(world_size=world_size, gamma=sogclr_gamma, rho_init=rho_init, tau_init=tau_init, bsz=bsz,
+                                                 eta_init=eta_init, beta_u=beta_u)
+        elif self.ita_type == 'isogclr_new_v1':
+            self.criterion = iSogCLR_New_v1_Loss(world_size=world_size, gamma=sogclr_gamma, rho_init=rho_init, bsz=bsz)
         
-        print('-------------- Begin Training --------------')
-        for epoch in range(max_epochs):
-            epoch_loss = 0.0
-            self.image_encoder.train()
-            self.text_encoder.train()
-            for batch_idx, (images, captions, indices) in enumerate(train_loader):
-                # Uncomment to skip to validation after 1 batch 
-                # if batch_idx * train_loader.batch_size > 50:
-                #     break
-                images = images.to(self.device)
-                captions = captions.to(self.device)
-                
-                opt.zero_grad()
-                image_features, text_features = self.forward(images, captions)
-                if need_indices:
-                    loss = loss_fn(image_features, text_features, indices, indices)
-                else:
-                    loss = loss_fn(image_features, text_features)
-                epoch_loss += loss.item()
-                
-                if batch_idx % log_interval == 0:
-                    print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
-                loss.backward()
-                opt.step()
+        elif self.ita_type == 'onlineclr':
+            self.criterion = onlineCLR_Loss(world_size=world_size, temperature=self.temp, gamma=sogclr_gamma)
 
-            sched.step()
-               
-            # Start validation
-            self.image_encoder.eval()
-            self.text_encoder.eval()
+        elif self.ita_type == 'isogclr_new':
+            self.criterion = iSogCLR_New_Loss(world_size=world_size, gamma=sogclr_gamma, rho_I=rho_I, rho_T=rho_T, tau_init=tau_init, bsz=bsz,
+                                              use_temp_net=use_temp_net, feature_dim=embed_dim)
+        else:
+            raise NotImplementedError
 
-            # Evaluate metrics
-            img_to_text_r1, text_to_img_r1 = self.evaluate_image_and_text(coco_loader)
-            top1_accuracy = self.evaluate_top1_classification(imagenet_loader)
 
-            # Print and store results
-            print(f"Epoch {epoch + 1}/{max_epochs} - Loss: {epoch_loss:.4f} - "
-                f"I_to_T R1: {img_to_text_r1:.4f} T_to_I R1: {text_to_img_r1:.4f} ZS acc: {top1_accuracy:.4f}")
-            img_to_text.append(img_to_text_r1)
-            text_to_image.append(text_to_img_r1)
-            top_1.append(top1_accuracy)
-
-        return img_to_text, text_to_image, top_1
-
-    def evaluate_image_and_text(self, coco_loader):
-        """
-        Evaluate both Image-to-Text and Text-to-Image R@1 in a single pass through coco_loader.
-        """
-        image_features = []
-        text_features = []
-        for images, captions in coco_loader:
-            # Move data to the correct device
-            images = images.to(self.device)
-            input_ids = captions['input_ids'].to(self.device)
-            attention_mask = captions['attention_mask'].to(self.device)
-            
+    def forward(self, image, text, idx, text_idx, epoch, max_epoch):
+        if self.learnable_temp:
             with torch.no_grad():
-                # Extract and normalize image features
-                img_feats = self.image_proj(self.image_encoder(images))
-                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-                image_features.append(img_feats)
-                
-                # Extract and normalize text features
-                text_rep = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state[:, 0]
-                txt_feats = self.text_proj(text_rep)
-                txt_feats = txt_feats / txt_feats.norm(dim=-1, keepdim=True)
-                text_features.append(txt_feats)
+                if not self.personalized_tau:
+                    self.temp.clamp_(0.001, 0.5)
+                else:
+                    self.image_temp.clamp_(0.001, 0.5)
+                    self.text_temp.clamp_(0.001, 0.5)
         
-        # Concatenate features
-        image_features = torch.cat(image_features, dim=0)
-        text_features = torch.cat(text_features, dim=0)
+        image_embeds = self.visual_encoder(image)
+        image_embeds = self.vision_proj(image_embeds)
+        image_feat = F.normalize(image_embeds, dim=-1) 
 
-        # Compute similarity matrices
-        similarity_matrix = F.cosine_similarity(image_features.unsqueeze(1), text_features.unsqueeze(0), dim=-1)
+        text_output = self.text_encoder(text.input_ids, attention_mask=text.attention_mask, output_hidden_states=False)
+        text_embeds = self.text_proj(text_output.last_hidden_state[:,0,:])
+        text_feat = F.normalize(text_embeds, dim=-1)                 
 
-        # Image-to-Text R@1
-        img_to_text_top_indices = similarity_matrix.argmax(dim=1)
-        img_to_text_correct = sum(idx == i for i, idx in enumerate(img_to_text_top_indices))
-        img_to_text_r1 = img_to_text_correct / len(image_features)
+        avg_image_tau = None
+        avg_text_tau = None
+        cur_eta = None
+        grad_tau_image = None
+        grad_tau_text = None
+        b_I = None
+        b_T = None
 
-        # Text-to-Image R@1
-        text_to_img_top_indices = similarity_matrix.argmax(dim=0)
-        text_to_img_correct = sum(idx == i for i, idx in enumerate(text_to_img_top_indices))
-        text_to_img_r1 = text_to_img_correct / len(text_features)
+        info_dict = {}
 
-        return img_to_text_r1, text_to_img_r1
+        if self.ita_type in ['clip', 'cyclip']:
+            if self.personalized_tau:
+                if self.distributed:
+                    image_ids = concat_all_gather(idx)
+                    text_ids = concat_all_gather(text_idx)
+                else:
+                    image_ids, text_ids = idx, text_idx
+                loss_ita = self.criterion(image_feat, text_feat, image_ids, text_ids)
+                info_dict['avg_image_tau'] = self.criterion.image_tau[image_ids].mean()
+                info_dict['avg_text_tau'] = self.criterion.text_tau[text_ids].mean()
 
-    def evaluate_top1_classification(self, imagenet_loader):
-        """Evaluate Top-1 Classification Accuracy."""
-        correct, total = 0, 0
-        for images, labels in imagenet_loader:
-            images, labels = images.to(self.device), labels.to(self.device)
-            outputs = self.image_encoder(images)
-            preds = outputs.argmax(dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-        return correct / total
+            else:
+                loss_ita = self.criterion(image_feat, text_feat)
+                if not self.learnable_temp:
+                    avg_tau = torch.tensor(self.temp)
+                else:
+                    avg_tau = self.temp
+                info_dict['avg_image_tau'] = avg_tau
+                info_dict['avg_text_tau'] = avg_tau
 
+        elif self.ita_type == 'vicreg':
+            loss_ita = self.criterion(image_embeds, text_embeds)
+            info_dict['avg_image_tau'] = 0.0
+            info_dict['avg_text_tau'] = 0.0
+
+        elif self.ita_type == 'sogclr':
+            if self.distributed:
+                image_ids = concat_all_gather(idx)
+                text_ids = concat_all_gather(text_idx)
+            else:
+                image_ids, text_ids = idx, text_idx
+            loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
+            if not self.learnable_temp:
+                avg_tau = torch.tensor(self.temp)
+            else:
+                avg_tau = self.temp
+            info_dict['avg_text_tau'] = avg_text_tau
+            info_dict['avg_image_tau'] = avg_image_tau
+            info_dict['lamda'] = 0.0
+
+        elif self.ita_type in ['sogclr_dro', 'isogclr_new']:
+            if self.distributed:
+                image_ids = concat_all_gather(idx)
+                text_ids = concat_all_gather(text_idx)
+            else:
+                image_ids, text_ids = idx, text_idx
+            loss_ita, avg_image_tau, avg_text_tau, cur_eta, grad_tau_image, grad_tau_text, b_I, b_T = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch, max_epoch)
+            info_dict = {'avg_image_tau':avg_image_tau, 'avg_text_tau':avg_text_tau, 'cur_eta':cur_eta, 
+                         'grad_tau_image':grad_tau_image, 'grad_tau_text':grad_tau_text, 'b_I':b_I, 'b_T':b_T}
+
+        elif self.ita_type == 'isogclr_new_v2':
+            if self.distributed:
+                image_ids = concat_all_gather(idx)
+                text_ids = concat_all_gather(text_idx)
+            else:
+                image_ids, text_ids = idx, text_idx
+            loss_ita, avg_image_tau, avg_text_tau, cur_eta, grad_tau_image, grad_tau_text, b_I, b_T, v, lamda = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch, max_epoch)
+            info_dict = {'avg_image_tau':avg_image_tau, 'avg_text_tau':avg_text_tau, 'cur_eta':cur_eta, 
+                         'grad_tau_image':grad_tau_image, 'grad_tau_text':grad_tau_text, 'b_I':b_I, 'b_T':b_T, 'v':v, 'lamda':lamda}
+
+        elif self.ita_type == 'isogclr_new_v1':
+            if self.distributed:
+                image_ids = concat_all_gather(idx)
+                text_ids = concat_all_gather(text_idx)
+            else:
+                image_ids, text_ids = idx, text_idx
+            loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
+            info_dict['avg_text_tau'] = avg_text_tau
+            info_dict['avg_image_tau'] = avg_image_tau
+
+        elif self.ita_type == 'onlineclr':
+            loss_ita = self.criterion(image_feat, text_feat)
+            info_dict['avg_text_tau'] = 0.0
+            info_dict['avg_image_tau'] = 0.0
+
+        else:
+            raise NotImplementedError
+
+        return loss_ita, info_dict
+
+@torch.no_grad()
+def concat_all_gather(tensor):
+    """
+    Performs all_gather operation on the provided tensors.
+    *** Warning ***: torch.distributed.all_gather has no gradient.
+    """
+    tensors_gather = [torch.ones_like(tensor)
+        for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+
+    output = torch.cat(tensors_gather, dim=0)
+    return output
+
+class CLIP_Network():
+    def __init__(self, model, optim, tokenizer, **kwargs):
+        self.network = model
+        self.network = self.network.cuda()
+        self.optimizer = optim
+        self.tokenizer = tokenizer
+
+def create_optimizer(params, model):
+    opt_params = model.parameters()
+    weight_decay = params.weight_decay
+
+    if params.optimizer == "adam":
+        optimizer = optim.Adam(parameters)
+    elif params.optimizer == "adamw":
+        optimizer = optim.AdamW(parameters)
+    elif params.optimizer == "sgd":
+        optimizer = optim.SGD(parameters, momentum=params.momentum, nesterov=True)
+    return optimizer
