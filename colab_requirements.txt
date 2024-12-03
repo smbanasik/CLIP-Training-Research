@@ -1,9 +1,3 @@
 timm==0.9.7
 torch
-numpy 
-random
-time 
-datetime
-os
-math
 transformers==4.34.0
