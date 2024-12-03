@@ -16,42 +16,46 @@ from torchvision import transforms, datasets
 
 from data_process import generate_loaders
 
+import pipeline as pipe
+import our_model as our
+
 class HyperParamsAndArgs():
     def __init__(self, **kwargs):
+        # These cannot be changed - project requirements
         self.epochs = 30
         self.batch_size = 128
+        self.text_encoder = "distilbert-base-uncased"
+        self.image_encoder = "resnet50"
+        # This shouldn't be changed
         self.seed = 615
-
         self.output_dir = "../output"
+        # Anything below may be modified
+        
+        self.ita_type = "sogclr"
+        self.optimizer = "adamW"
+        self.schedular = "cosine"
 
-        self.learn_rates = [0.0005, 0.001, 0.002]
-        self.learn_rates_pesg = [0.02, 0.05, 0.1]
-        self.lr_decay = 0.1
-        self.lr_epoch = 30
-        self.weight_decay = 0
-        self.gammas = [0.2, 0.5, 0.8]
-        self.decay_epochs = []
+        self.learn_rate = 2e-4
 
 def main():
 
-    parameters = HyperParamsAndArgs()
-    torch.manual_seed(parameters.seed)
-    np.random.seed(parameters.seed)
-    random.seed(parameters.seed)
+    params = HyperParamsAndArgs()
+    torch.manual_seed(params.seed)
+    np.random.seed(params.seed)
+    random.seed(params.seed)
 
     # TODO: make sure this function does what its intended to do
-    train_loader, coco_loader, imagenet_loader = generate_loaders(parameters)
+    train_loader, coco_loader, imagenet_loader = generate_loaders(params)
 
-    # TODO: create model here
-    # Ensure model gets moved to CUDA.
-    model = Model_Default(learn_rate, 0.003)
-    '''
-    model = CLIP(image_encoder=args.image_encoder, text_encoder=args.text_encoder, embed_dim=args.embed_dim, init_model=args.init_model, bsz=args.batch_size_train*args.world_size,
+    # TODO: Fix params
+    model = our.CLIP(image_encoder=params.image_encoder, text_encoder=params.text_encoder, embed_dim=args.embed_dim, init_model=args.init_model, bsz=args.batch_size_train*args.world_size,
                   world_size=args.world_size, ita_type=args.ita_type, sogclr_gamma=args.sogclr_gamma, rho_I=args.rho_I, rho_T=args.rho_T, tau_init=args.tau_init,
                   eta_init=args.eta_init, beta_u=args.beta_u, temp=args.temp, learnable_temp=args.learnable_temp,
                   vicreg_sim_coeff=args.vicreg_sim_coeff, vicreg_std_coeff=args.vicreg_std_coeff, personalized_tau=args.personalized_tau, 
                   use_temp_net=args.isogclr_temp_net, alpha=args.alpha, distributed=args.distributed)
-    '''
+    tokenizer = AutoTokenizer.from_pretrained(params.text_encoder)
+    network = our.CLIP_Network(model, loss, optimizer, tokenizer)
+    
     
     print("--Begin training--")
 
@@ -61,10 +65,7 @@ def main():
     test_best = 0
     train_list_AUPRC, test_list_AUPRC = [], []
     train_list_AUROC, test_list_AUROC = [], []
-    for epoch in range(parameters.epochs):
-        if epoch in parameters.decay_epochs:
-            model.opt.update_lr(decay_factor=10)
-            pass
+    for epoch in range(params.epochs):
         
         # TODO: Train function from pipeline.py, adapt to our network dataloader model
 

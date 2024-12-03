@@ -28,8 +28,8 @@ from optim import create_optimizer
 from zeroshot_transfer.classes import CIFAR10_CLASSES, CIFAR100_CLASSES, IMAGENET_CLASSES
 
 from tqdm import tqdm
-
-def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_steps, device, scheduler, grad_scaler, args):
+# optimizer, tokenizer, epoch, max_epoch, warmup_steps, device, scheduler, args
+def train(network, data_loader, parameters, current_epoch):
     # train
     model.train()
     
@@ -65,16 +65,9 @@ def train(model, data_loader, optimizer, tokenizer, epoch, max_epoch, warmup_ste
         # set learning rate for temperature network
         optimizer.param_groups[2]["lr"] = optimizer.param_groups[0]["lr"] / 10.0
 
-        if grad_scaler is None:
-            loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-            loss_ita.backward()
-            optimizer.step()
-        else:
-            with torch.cuda.amp.autocast():
-                loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
-            grad_scaler.scale(loss_ita).backward()
-            grad_scaler.step(optimizer)
-            grad_scaler.update()
+        loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
+        loss_ita.backward()
+        optimizer.step()
         
         metric_logger.update(loss_ita=loss_ita.item())
 
