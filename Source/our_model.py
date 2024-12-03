@@ -225,9 +225,8 @@ def concat_all_gather(tensor):
     return output
 
 class CLIP_Network():
-    def __init__(self, model, loss, optim, tokenizer, **kwargs):
+    def __init__(self, model, optim, tokenizer, **kwargs):
         self.network = model
         self.network = self.network.cuda()
-        self.loss_func = loss
         self.optimizer = optim
         self.tokenizer = tokenizer
