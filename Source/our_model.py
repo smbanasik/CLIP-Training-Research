@@ -4,8 +4,7 @@
 from functools import partial
 
 import timm
-from transformers import AutoModel, RobertaModel
-
+from transformers import DistilBertModel, DistilBertTokenizer
 from losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss
 
 import torch
@@ -20,8 +19,8 @@ class CLIP(nn.Module):
                  text_encoder = None,
                  embed_dim = 256,
                  init_model = True,
-                 world_size = 8,
-                 ita_type = 'clip',
+                 world_size = 1,
+                 ita_type = 'cyclip',
                  sogclr_gamma = 0.9,
                  rho_I = 0.1,
                  rho_T = 0.1,
@@ -44,171 +43,58 @@ class CLIP(nn.Module):
 
         self.temp = temp
         self.learnable_temp = learnable_temp
-        self.personalized_tau = personalized_tau
-
-        self.distributed = distributed
 
         if self.learnable_temp:
-            if not personalized_tau:
-                self.temp = nn.Parameter(torch.ones([]) * self.temp)
-            else:
-                self.image_temp = nn.Parameter(torch.ones(2900000) * self.temp)
-                self.text_temp = nn.Parameter(torch.ones(2900000) * self.temp)
+            self.image_temp = nn.Parameter(torch.ones(2900000) * self.temp)
+            self.text_temp = nn.Parameter(torch.ones(2900000) * self.temp)
     
-        self.visual_encoder = timm.create_model(image_encoder, pretrained=init_model)
-        self.visual_encoder.reset_classifier(0)
+        self.visual_encoder = timm.create_model('resnet50', pretrained=True)
+        self.text_encoder = DistilBertModel.from_pretrained("distilbert-base-uncased", attn_implementation="sdpa")
+        self.tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
 
-        if text_encoder == 'roberta-large':
-            self.text_encoder = RobertaModel.from_pretrained(text_encoder)
-            self.text_proj = nn.Linear(1024, embed_dim)
-        else:
-            self.text_encoder = AutoModel.from_pretrained(text_encoder)
-            self.text_proj = nn.Linear(768, embed_dim)
-
-        if not init_model:
-            self.text_encoder.init_weights()
-
+        # Projection Layers
+        self.text_proj = nn.Linear(self.text_encoder.num_features, embed_dim)
         self.vision_proj = nn.Linear(self.visual_encoder.num_features, embed_dim)   
 
         self.ita_type = ita_type
 
-        if self.ita_type == 'clip':
-            if not personalized_tau:
-                self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, temperature=self.temp)
-            else:
-                self.criterion = CLIP_Loss(world_size=world_size, personalized_tau=personalized_tau, image_tau=self.image_temp, text_tau=self.text_temp)
-
-        elif self.ita_type == 'cyclip':
-            self.criterion = CyCLIP_Loss(world_size=world_size, temperature=self.temp)
-
+        if self.ita_type == 'cyclip':
+            self.loss_fn = CyCLIP_Loss(world_size=world_size, temperature=self.temp)
         elif self.ita_type == 'vicreg':
-            self.criterion = VICReg_Loss(world_size=world_size, dim_size=embed_dim, sim_coeff=vicreg_sim_coeff, std_coeff=vicreg_std_coeff)
-
+            self.loss_fn = VICReg_Loss(world_size=world_size, dim_size=embed_dim, sim_coeff=vicreg_sim_coeff, std_coeff=vicreg_std_coeff)
         elif self.ita_type == 'sogclr':
-            self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp)
+            self.loss_fn = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp)
         else:
             raise NotImplementedError
 
-
-    def forward(self, image, text, idx, text_idx, epoch, max_epoch):
+    def forward(self, image, text, idx, text_idx, epoch):
         if self.learnable_temp:
             with torch.no_grad():
-                if not self.personalized_tau:
-                    self.temp.clamp_(0.001, 0.5)
-                else:
-                    self.image_temp.clamp_(0.001, 0.5)
-                    self.text_temp.clamp_(0.001, 0.5)
-        
+                self.image_temp.clamp_(0.001, 0.5)
+                self.text_temp.clamp_(0.001, 0.5)
+
+        # Get features of image
         image_embeds = self.visual_encoder(image)
         image_embeds = self.vision_proj(image_embeds)
         image_feat = F.normalize(image_embeds, dim=-1) 
 
+        # Get features of caption
         text_output = self.text_encoder(text.input_ids, attention_mask=text.attention_mask, output_hidden_states=False)
         text_embeds = self.text_proj(text_output.last_hidden_state[:,0,:])
         text_feat = F.normalize(text_embeds, dim=-1)                 
 
-        avg_image_tau = None
-        avg_text_tau = None
-        cur_eta = None
-        grad_tau_image = None
-        grad_tau_text = None
-        b_I = None
-        b_T = None
-
-        info_dict = {}
-
-        if self.ita_type in ['clip', 'cyclip']:
-            if self.personalized_tau:
-                if self.distributed:
-                    image_ids = concat_all_gather(idx)
-                    text_ids = concat_all_gather(text_idx)
-                else:
-                    image_ids, text_ids = idx, text_idx
-                loss_ita = self.criterion(image_feat, text_feat, image_ids, text_ids)
-                info_dict['avg_image_tau'] = self.criterion.image_tau[image_ids].mean()
-                info_dict['avg_text_tau'] = self.criterion.text_tau[text_ids].mean()
-
-            else:
-                loss_ita = self.criterion(image_feat, text_feat)
-                if not self.learnable_temp:
-                    avg_tau = torch.tensor(self.temp)
-                else:
-                    avg_tau = self.temp
-                info_dict['avg_image_tau'] = avg_tau
-                info_dict['avg_text_tau'] = avg_tau
-
-        elif self.ita_type == 'vicreg':
-            loss_ita = self.criterion(image_embeds, text_embeds)
-            info_dict['avg_image_tau'] = 0.0
-            info_dict['avg_text_tau'] = 0.0
-
-        elif self.ita_type == 'sogclr':
-            if self.distributed:
-                image_ids = concat_all_gather(idx)
-                text_ids = concat_all_gather(text_idx)
-            else:
-                image_ids, text_ids = idx, text_idx
-            loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
-            if not self.learnable_temp:
-                avg_tau = torch.tensor(self.temp)
-            else:
-                avg_tau = self.temp
-            info_dict['avg_text_tau'] = avg_text_tau
-            info_dict['avg_image_tau'] = avg_image_tau
-            info_dict['lamda'] = 0.0
-
-        elif self.ita_type in ['sogclr_dro', 'isogclr_new']:
-            if self.distributed:
-                image_ids = concat_all_gather(idx)
-                text_ids = concat_all_gather(text_idx)
-            else:
-                image_ids, text_ids = idx, text_idx
-            loss_ita, avg_image_tau, avg_text_tau, cur_eta, grad_tau_image, grad_tau_text, b_I, b_T = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch, max_epoch)
-            info_dict = {'avg_image_tau':avg_image_tau, 'avg_text_tau':avg_text_tau, 'cur_eta':cur_eta, 
-                         'grad_tau_image':grad_tau_image, 'grad_tau_text':grad_tau_text, 'b_I':b_I, 'b_T':b_T}
-
-        elif self.ita_type == 'isogclr_new_v2':
-            if self.distributed:
-                image_ids = concat_all_gather(idx)
-                text_ids = concat_all_gather(text_idx)
-            else:
-                image_ids, text_ids = idx, text_idx
-            loss_ita, avg_image_tau, avg_text_tau, cur_eta, grad_tau_image, grad_tau_text, b_I, b_T, v, lamda = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch, max_epoch)
-            info_dict = {'avg_image_tau':avg_image_tau, 'avg_text_tau':avg_text_tau, 'cur_eta':cur_eta, 
-                         'grad_tau_image':grad_tau_image, 'grad_tau_text':grad_tau_text, 'b_I':b_I, 'b_T':b_T, 'v':v, 'lamda':lamda}
-
-        elif self.ita_type == 'isogclr_new_v1':
-            if self.distributed:
-                image_ids = concat_all_gather(idx)
-                text_ids = concat_all_gather(text_idx)
-            else:
-                image_ids, text_ids = idx, text_idx
-            loss_ita, avg_image_tau, avg_text_tau = self.criterion(image_feat, text_feat, image_ids, text_ids, epoch)
-            info_dict['avg_text_tau'] = avg_text_tau
-            info_dict['avg_image_tau'] = avg_image_tau
-
-        elif self.ita_type == 'onlineclr':
-            loss_ita = self.criterion(image_feat, text_feat)
-            info_dict['avg_text_tau'] = 0.0
-            info_dict['avg_image_tau'] = 0.0
-
+        if self.ita_type == 'cyclip':
+            loss_ita = self.loss_fn(image_feat, text_feat)
+        elif self.loss_fn == 'vicreg':
+            loss_ita = self.loss_fn(image_embeds, text_embeds)
+        elif self.loss_fn == 'sogclr':
+            image_ids, text_ids = idx, text_idx
+            loss_ita, _, _ = self.loss_fn(image_feat, text_feat, image_ids, text_ids, epoch)
         else:
             raise NotImplementedError
 
-        return loss_ita, info_dict
+        return loss_ita
 
-@torch.no_grad()
-def concat_all_gather(tensor):
-    """
-    Performs all_gather operation on the provided tensors.
-    *** Warning ***: torch.distributed.all_gather has no gradient.
-    """
-    tensors_gather = [torch.ones_like(tensor)
-        for _ in range(torch.distributed.get_world_size())]
-    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
-
-    output = torch.cat(tensors_gather, dim=0)
-    return output
 
 class CLIP_Network():
     def __init__(self, model, optim, tokenizer, params, **kwargs):
