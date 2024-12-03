@@ -45,8 +45,9 @@ class CLIP_Model():
             self.image_encoder.train()
             self.text_encoder.train()
             for batch_idx, (images, captions, indices) in enumerate(train_loader):
-                if batch_idx * train_loader.batch_size > 50:
-                    break
+                # Uncomment to skip to validation after 1 batch 
+                # if batch_idx * train_loader.batch_size > 50:
+                #     break
                 images = images.to(self.device)
                 captions = captions.to(self.device)
                 
