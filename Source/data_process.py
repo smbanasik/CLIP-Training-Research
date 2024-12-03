@@ -5,18 +5,19 @@ from timm.data import resolve_data_config
 from timm.data.transforms_factory import create_transform
 
 from torchvision import datasets
+from transformers import DistilBertTokenizer
 
 import json 
 import os 
+import torch
 
 # CC3M Training Dataset
 class CC3MDataset(Dataset):
-    def __init__(self, captions_file, img_root_dir, transform=None, tokenizer=None):
+    def __init__(self, captions_file, img_root_dir, transform=None):
         """
         Args:
             captions_file (str): Path to the captions JSON file.
             root_dir (str): Path to the root directory of the images.
-            tokenizer (callable, optional): Tokenizer for caption data
         """
 
         self.img_root_dir = img_root_dir
@@ -28,8 +29,6 @@ class CC3MDataset(Dataset):
             config = resolve_data_config({}, model='resnet50')
             self.transform  = create_transform(**config)        
         
-        self.tokenizer = tokenizer
-
         # Load captions and image paths from the JSON file
         with open(captions_file, 'r') as f:
             self.data = json.load(f)
@@ -38,35 +37,23 @@ class CC3MDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        """
-        Fetch a single data sample (image and caption) based on index.
-        """
-
         sample = self.data[idx]
 
         # Load image
         img_path = os.path.join(self.img_root_dir, sample['image'])
         image = Image.open(img_path).convert('RGB')
-
-        # Apply image transformation if provided
-        if self.transform:
-            image = self.transform(image)
-
-        # Process caption (tokenize if tokenizer is provided)
+        
         caption = sample['caption']
-        if self.tokenizer:
-            caption = self.tokenizer(caption)
-
-        return image, caption
+        # Return the image index, required by SogCLR loss function
+        return image, caption, idx
 
 # MS-COCO Validation Dataset for recall
 class MSCOCODataset(Dataset):
-    def __init__(self, captions_file, img_root_dir, transform=None, tokenizer=None):
+    def __init__(self, captions_file, img_root_dir, transform=None):
         """
         Args:
             captions_file (str): Path to the captions JSON file.
             root_dir (str): Path to the root directory of the images.
-            tokenizer (callable, optional): Tokenizer for caption data
         """
 
         self.img_root_dir = img_root_dir
@@ -78,8 +65,6 @@ class MSCOCODataset(Dataset):
             config = resolve_data_config({}, model='resnet50')
             self.transform  = create_transform(**config)        
         
-        self.tokenizer = tokenizer
-
         # Load captions and image paths from the JSON file
         with open(captions_file, 'r') as f:
             raw_coco_data = json.load(f)
@@ -94,25 +79,13 @@ class MSCOCODataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        """
-        Fetch a single data sample (image and caption) based on index.
-        """
-
         sample = self.data[idx]
 
         # Load image
         img_path = os.path.join(self.img_root_dir, sample['image'])
         image = Image.open(img_path).convert('RGB')
-
-        # Apply image transformation if provided
-        if self.transform:
-            image = self.transform(image)
-
-        # Process caption (tokenize if tokenizer is provided)
+        
         caption = sample['caption']
-        if self.tokenizer:
-            caption = self.tokenizer(caption)
-
         return image, caption
 
 # ImageNet Validation Dataset for zero-shot predictions
@@ -156,16 +129,28 @@ class ImageNetDataset(Dataset):
         sample = self.data[idx]
 
         # Load image
-        img_path = sample['image']
+        img_path = os.path.join(self.img_root_dir, sample['image'])
         image = Image.open(img_path).convert('RGB')
 
-        # Apply image transformation if provided
         if self.transform:
             image = self.transform(image)
-
-        # Return image and corresponding class description
+        
         description = sample['description']
         return image, description
+
+# Perform image transformations and tokenization of raw captions
+def collate_fn(batch, image_transform, tokenizer):
+    images, captions = zip(*batch)
+    images = torch.stack([image_transform(img) for img in images])
+    cap_tokens = tokenizer(list(captions), padding=True, truncation=True, return_tensors="pt")
+    return images, cap_tokens
+
+# Collate function for training set
+def collate_fn_with_index(batch, image_transform, tokenizer):
+    images, captions, indices = zip(*batch)
+    images = torch.stack([image_transform(img) for img in images])
+    cap_tokens = tokenizer(list(captions), padding=True, truncation=True, return_tensors="pt")
+    return images, cap_tokens, torch.tensor(indices, dtype=torch.long)
 
 # Create DataLoader objects for the three datasets
 def generate_loaders(parameters):
@@ -182,9 +167,13 @@ def generate_loaders(parameters):
     IMAGENET_CAPTION_FILE = '../Datasets/imagenet/imagenet_class_index.json'
     imagenet_valid = ImageNetDataset(IMAGENET_IMG_ROOT, IMAGENET_CAPTION_FILE)
 
-    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False)
-    coco_loader = DataLoader(coco_valid, batch_size=parameters.batch_size, shuffle=False)
-    imagenet_loader = DataLoader(imagenet_valid, batch_size=parameters.batch_size, shuffle=False)
+    # NOTE: I'm assuming we want this consistent across datasets
+    tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
+
+    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=lambda batch: collate_fn_with_index(batch, train.transform, tokenizer))
+    coco_loader = DataLoader(coco_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=lambda batch: collate_fn(batch, coco_valid.transform, tokenizer))
+    # No captions, use torch's default collate_fn
+    imagenet_loader = DataLoader(imagenet_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
     return train_loader, coco_loader, imagenet_loader
 
