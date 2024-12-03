@@ -1,0 +1,5 @@
+datasets/
+!imagenet/imagenet_class_index.json
+
+checkpoints/
+output/
