@@ -27,7 +27,7 @@ def main(params):
     train_loader, coco_loader, imagenet_loader = generate_loaders(params)
 
     print("Creating model")
-    model = our.CLIP(image_encoder=params.image_encoder, text_encoder=params.text_encoder, embed_dim=args.embed_dim, init_model=args.True, bsz=params.batch_size,
+    model = our.CLIP(image_encoder=params.image_encoder, text_encoder=params.text_encoder, embed_dim=params.embed_dim, init_model=True, bsz=params.batch_size,
                   world_size=1, ita_type=params.loss_type, sogclr_gamma=params.sogclr_gamma, rho_I=params.rho_I, rho_T=params.rho_T, tau_init=params.tau_init,
                   eta_init=params.eta_init, beta_u=params.beta_u, temp=params.temp, learnable_temp=params.learnable_temp,
                   vicreg_sim_coeff=params.vicreg_sim_coeff, vicreg_std_coeff=params.vicreg_std_coeff, personalized_tau=params.personalized_tau, 
@@ -89,7 +89,7 @@ class HyperParamsAndArgs():
 
         self.is_evaluating = False
         self.is_training = True
-
+        
         self.learn_rate = 2e-4
         self.weight_decay = 0.02
         self.momentum = 0.09
@@ -103,6 +103,7 @@ class HyperParamsAndArgs():
         self.vicreg_sim_coeff = 25.0
         self.vicreg_std_coeff = 25.0
         self.alpha = 1.0
+        self.embed_dim = 256
 
         self.learnable_temp = True
         self.personalized_tau = True
