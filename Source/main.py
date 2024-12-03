@@ -1,9 +1,18 @@
-import torch
 import numpy as np
-from PIL import Image
+import random
+import time
+import datetime
+import json
+from pathlib import Path
+
+import torch
+import torchvision
 import torch.nn as nn
-import torchvision.transforms as transforms
-import matplotlib.pyplot as plt
+import torch.nn.functional as F
+import torch.backends.cudnn as cudnn
+import torch.distributed as dist
+from torch.utils.data import DataLoader, Subset
+from torchvision import transforms, datasets
 
 from torch.optim import AdamW, Adam
 from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
@@ -11,39 +20,19 @@ from data_process import generate_loaders
 from our_model import CLIP_Model
 from losses import SogCLR_Loss
 
-def plot_save(train_log, test_log, title, ylabel, filename):
-    plt.rcParams["figure.figsize"] = (9,5)
-    x=np.arange(len(train_log))
-    plt.figure()
-    plt.plot(x, train_log, linestyle='-', label='Train Set', linewidth=3)
-    plt.plot(x, test_log,  linestyle='-', label='Test Set', linewidth=3)
-    plt.title(title,fontsize=25)
-    plt.legend(fontsize=15)
-    plt.grid()
-    plt.ylabel(ylabel, fontsize=25)
-    plt.xlabel('Epoch', fontsize=25)
-    plt.savefig(filename)
 
-def plot(train_log, test_log, title, ylabel):
-    plt.rcParams["figure.figsize"] = (9,5)
-    x=np.arange(len(train_log))
-    plt.figure()
-    plt.plot(x, train_log, linestyle='-', label='Train Set', linewidth=3)
-    plt.plot(x, test_log,  linestyle='-', label='Test Set', linewidth=3)
-    plt.title(title,fontsize=25)
-    plt.legend(fontsize=15)
-    plt.grid()
-    plt.ylabel(ylabel, fontsize=25)
-    plt.xlabel('Epoch', fontsize=25)
-    plt.show()
-
-class HyperParams():
-    def __init__(self):
+class HyperParamsAndArgs():
+    def __init__(self, **kwargs):
         self.epochs = 30
-        self.lr = 0.01
+        self.batch_size = 128
+        self.seed = 615
+
+        self.output_dir = "../output"
+
+        self.learn_rates = [0.0005, 0.001, 0.002]
+        self.learn_rates_pesg = [0.02, 0.05, 0.1]
         self.lr_decay = 0.1
         self.lr_epoch = 30
-        self.batch_size = 32
         self.weight_decay = 0
         self.gamma = 0.1
         self.step_size = 15
