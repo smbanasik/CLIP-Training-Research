@@ -44,7 +44,8 @@ class CC3MDataset(Dataset):
         image = Image.open(img_path).convert('RGB')
         
         caption = sample['caption']
-        return image, caption
+        # Return the image index, required by SogCLR loss function
+        return image, caption, idx
 
 # MS-COCO Validation Dataset for recall
 class MSCOCODataset(Dataset):
@@ -144,6 +145,13 @@ def collate_fn(batch, image_transform, tokenizer):
     cap_tokens = tokenizer(list(captions), padding=True, truncation=True, return_tensors="pt")
     return images, cap_tokens
 
+# Collate function for training set
+def collate_fn_with_index(batch, image_transform, tokenizer):
+    images, captions, indices = zip(*batch)
+    images = torch.stack([image_transform(img) for img in images])
+    cap_tokens = tokenizer(list(captions), padding=True, truncation=True, return_tensors="pt")
+    return images, cap_tokens, torch.tensor(indices, dtype=torch.long)
+
 # Create DataLoader objects for the three datasets
 def generate_loaders(parameters):
     CC3M_CAPTION_FILE = '../clip_train/cc3m_train_subset.json'
@@ -162,7 +170,7 @@ def generate_loaders(parameters):
     # NOTE: I'm assuming we want this consistent across datasets
     tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
 
-    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=lambda batch: collate_fn(batch, train.transform, tokenizer))
+    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=lambda batch: collate_fn_with_index(batch, train.transform, tokenizer))
     coco_loader = DataLoader(coco_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=lambda batch: collate_fn(batch, coco_valid.transform, tokenizer))
     # No captions, use torch's default collate_fn
     imagenet_loader = DataLoader(imagenet_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True)

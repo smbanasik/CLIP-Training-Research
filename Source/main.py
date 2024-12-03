@@ -40,7 +40,7 @@ def plot(train_log, test_log, title, ylabel):
 class HyperParams():
     def __init__(self):
         self.epochs = 30
-        self.learn_rates = [0.0005, 0.001, 0.002]
+        self.lr = 0.01
         self.lr_decay = 0.1
         self.lr_epoch = 30
         self.batch_size = 32
@@ -53,8 +53,8 @@ class HyperParams():
 # The encoders are pretrained and should have a lower learning rate to prevent overshooting
 def get_adamw_optimizer(model, lr=1e-4, weight_decay=1e-2):
     params = [
-        {'params': model.image_encoder.parameters(), 'lr': lr, 'weight_decay': weight_decay},
-        {'params': model.text_encoder.parameters(), 'lr': lr, 'weight_decay': weight_decay},
+        {'params': model.image_encoder.parameters(), 'lr': lr/10, 'weight_decay': weight_decay},
+        {'params': model.text_encoder.parameters(), 'lr': lr/10, 'weight_decay': weight_decay},
         {'params': model.image_proj.parameters(), 'lr': lr, 'weight_decay': weight_decay},
         {'params': model.text_proj.parameters(), 'lr': lr, 'weight_decay': weight_decay},
     ]
@@ -62,8 +62,8 @@ def get_adamw_optimizer(model, lr=1e-4, weight_decay=1e-2):
 
 def get_adam_optimizer(model, lr=1e-4):
     params = [
-        {'params': model.image_encoder.parameters(), 'lr': lr},
-        {'params': model.text_encoder.parameters(), 'lr': lr},
+        {'params': model.image_encoder.parameters(), 'lr': lr/10},
+        {'params': model.text_encoder.parameters(), 'lr': lr/10},
         {'params': model.image_proj.parameters(), 'lr': lr},
         {'params': model.text_proj.parameters(), 'lr': lr},
     ]
@@ -79,7 +79,7 @@ def main():
     adam_w = get_adamw_optimizer(clip_model, parameters.lr, parameters.weight_decay)
     adam = get_adam_optimizer(clip_model, parameters.lr)
     # Scheduler
-    step = StepLR(step_size=parameters.step_size, gamma=parameters.gamma)
+    step = StepLR(optimizer=adam_w, step_size=parameters.step_size, gamma=parameters.gamma)
     scores = clip_model.train(train_loader, coco_loader, imagenet_loader, sog_loss, adam_w, step, 5)
     print(f'scores: {scores}')
     

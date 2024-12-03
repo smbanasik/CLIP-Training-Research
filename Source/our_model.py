@@ -4,14 +4,15 @@ import torch.cuda
 import torch.nn as nn
 from transformers import DistilBertModel, DistilBertTokenizer
 import torch.nn.functional as F
+from losses import SogCLR_Loss
 
 class CLIP_Model():
     def __init__(self, latent_dim=256):
         self.device = torch.device('gpu' if torch.cuda.is_available() else 'cpu')
         self.image_encoder = timm.create_model('resnet50', pretrained=True).to(self.device)
-        self.text_encoder = DistilBertModel.from_pretrained("distilbert-base-uncased", torch_dtype=torch.float16, attn_implementation="sdpa")
-
-        image_feature_dim = 2048 # ResNet50 output dimension
+        self.text_encoder = DistilBertModel.from_pretrained("distilbert-base-uncased", attn_implementation="sdpa")
+        self.tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
+        image_feature_dim = 1000 # ResNet50 output dimension
         text_feature_dim = 768   # DistilBERT output dimension
 
         # Projection Layers
@@ -36,19 +37,25 @@ class CLIP_Model():
         self.text_proj.train()
 
         img_to_text, text_to_image, top_1 = [], [], []
+        need_indices = isinstance(loss_fn, SogCLR_Loss)
+        
         print('-------------- Begin Training --------------')
         for epoch in range(max_epochs):
             epoch_loss = 0.0
             self.image_encoder.train()
             self.text_encoder.train()
-            for batch_idx, (images, captions) in enumerate(train_loader):
+            for batch_idx, (images, captions, indices) in enumerate(train_loader):
+                if batch_idx * train_loader.batch_size > 50:
+                    break
                 images = images.to(self.device)
                 captions = captions.to(self.device)
                 
                 opt.zero_grad()
                 image_features, text_features = self.forward(images, captions)
-                
-                loss = loss_fn(image_features, text_features)
+                if need_indices:
+                    loss = loss_fn(image_features, text_features, indices, indices)
+                else:
+                    loss = loss_fn(image_features, text_features)
                 epoch_loss += loss.item()
                 
                 if batch_idx % log_interval == 0:
@@ -62,55 +69,61 @@ class CLIP_Model():
             self.image_encoder.eval()
             self.text_encoder.eval()
 
-            # Prepare validation features
-            coco_images, coco_captions = next(iter(coco_loader))
-            coco_images = coco_images.to(self.device)
-            coco_image_features = self.image_proj(self.image_encoder(coco_images))
-            coco_text_features = self.text_proj(self.text_encoder(coco_captions))
-
-            # Normalize features
-            coco_image_features = coco_image_features / coco_image_features.norm(dim=-1, keepdim=True)
-            coco_text_features = coco_text_features / coco_text_features.norm(dim=-1, keepdim=True)
-
-            # Evaluate on all metrics
-            img_to_text_r1 = self.evaluate_image_to_text(coco_loader, coco_text_features)
-            text_to_img_r1 = self.evaluate_text_to_image(coco_loader, coco_image_features)
+            # Evaluate metrics
+            img_to_text_r1, text_to_img_r1 = self.evaluate_image_and_text(coco_loader)
             top1_accuracy = self.evaluate_top1_classification(imagenet_loader)
 
-            print(f"Epoch {epoch + 1}/{max_epochs} - Loss: {epoch_loss:.4f} - I_to_T R1: {img_to_text_r1:.4f} T_to_I R1: {text_to_img_r1:.4f} ZS acc: {top1_accuracy:.4f}")
+            # Print and store results
+            print(f"Epoch {epoch + 1}/{max_epochs} - Loss: {epoch_loss:.4f} - "
+                f"I_to_T R1: {img_to_text_r1:.4f} T_to_I R1: {text_to_img_r1:.4f} ZS acc: {top1_accuracy:.4f}")
             img_to_text.append(img_to_text_r1)
             text_to_image.append(text_to_img_r1)
             top_1.append(top1_accuracy)
-        
+
         return img_to_text, text_to_image, top_1
-    
-    def evaluate_image_to_text(self, image_loader, text_features):
-        """Evaluate Text-to-Image R@1."""
+
+    def evaluate_image_and_text(self, coco_loader):
+        """
+        Evaluate both Image-to-Text and Text-to-Image R@1 in a single pass through coco_loader.
+        """
         image_features = []
-        for images, _ in image_loader:
-            images = images.to(self.device)
-            img_feats = self.image_proj(self.image_encoder(images))
-            image_features.append(img_feats / img_feats.norm(dim=-1, keepdim=True))
-        image_features = torch.cat(image_features, dim=0)
-
-        similarity_matrix = F.cosine_similarity(image_features.unsqueeze(1), text_features.unsqueeze(0), dim=-1)
-        top_indices = similarity_matrix.argmax(dim=1)
-        correct = sum(idx == i for i, idx in enumerate(top_indices))
-        return correct / len(image_features)
-
-    def evaluate_text_to_image(self, text_loader, image_features):
-        """Evaluate Text-to-Image R@1."""
         text_features = []
-        for _, captions in text_loader:
-            captions = captions.to(self.device)
-            text_feats = self.text_proj(self.text_encoder(captions))
-            text_features.append(text_feats / text_feats.norm(dim=-1, keepdim=True))
+        for images, captions in coco_loader:
+            # Move data to the correct device
+            images = images.to(self.device)
+            input_ids = captions['input_ids'].to(self.device)
+            attention_mask = captions['attention_mask'].to(self.device)
+            
+            with torch.no_grad():
+                # Extract and normalize image features
+                img_feats = self.image_proj(self.image_encoder(images))
+                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+                image_features.append(img_feats)
+                
+                # Extract and normalize text features
+                text_rep = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state[:, 0]
+                txt_feats = self.text_proj(text_rep)
+                txt_feats = txt_feats / txt_feats.norm(dim=-1, keepdim=True)
+                text_features.append(txt_feats)
+        
+        # Concatenate features
+        image_features = torch.cat(image_features, dim=0)
         text_features = torch.cat(text_features, dim=0)
 
+        # Compute similarity matrices
         similarity_matrix = F.cosine_similarity(image_features.unsqueeze(1), text_features.unsqueeze(0), dim=-1)
-        top_indices = similarity_matrix.argmax(dim=0)
-        correct = sum(idx == i for i, idx in enumerate(top_indices))
-        return correct / len(text_features)
+
+        # Image-to-Text R@1
+        img_to_text_top_indices = similarity_matrix.argmax(dim=1)
+        img_to_text_correct = sum(idx == i for i, idx in enumerate(img_to_text_top_indices))
+        img_to_text_r1 = img_to_text_correct / len(image_features)
+
+        # Text-to-Image R@1
+        text_to_img_top_indices = similarity_matrix.argmax(dim=0)
+        text_to_img_correct = sum(idx == i for i, idx in enumerate(text_to_img_top_indices))
+        text_to_img_r1 = text_to_img_correct / len(text_features)
+
+        return img_to_text_r1, text_to_img_r1
 
     def evaluate_top1_classification(self, imagenet_loader):
         """Evaluate Top-1 Classification Accuracy."""

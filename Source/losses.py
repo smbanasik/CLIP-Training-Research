@@ -11,22 +11,28 @@ import torch.distributed as dist
 
 
 # https://github.com/Spijkervet/SimCLR/blob/master/simclr/modules/gather.py
+# Commenting out most of this, since this is for the distributed setting
+# We assume only one GPU
 class GatherLayer(torch.autograd.Function):
     """Gather tensors from all process, supporting backward propagation."""
 
     @staticmethod
     def forward(ctx, input):
-        ctx.save_for_backward(input)
-        output = [torch.zeros_like(input) for _ in range(dist.get_world_size())]
-        dist.all_gather(output, input)
-        return tuple(output)
+        # ctx.save_for_backward(input)
+        # output = [torch.zeros_like(input) for _ in range(dist.get_world_size())]
+        # dist.all_gather(output, input)
+        # return tuple(output)
+        return (input,)
+
 
     @staticmethod
     def backward(ctx, *grads):
-        (input,) = ctx.saved_tensors
-        grad_out = torch.zeros_like(input)
-        grad_out[:] = grads[dist.get_rank()]
-        return grad_out
+        # (input,) = ctx.saved_tensors
+        # grad_out = torch.zeros_like(input)
+        # grad_out[:] = grads[dist.get_rank()]
+        # return grad_out
+        return grads[0]
+
 
 
 class CLIP_Loss(nn.Module):
@@ -66,11 +72,12 @@ class SogCLR_Loss(nn.Module):
            N is number of samples in training set
         """
         super(SogCLR_Loss, self).__init__()
+        self.device = torch.device('gpu' if torch.cuda.is_available() else 'cpu')
         self.world_size = world_size
-        self.s_I = torch.zeros(N).cuda()
-        self.s_T = torch.zeros(N).cuda()
-        self.b_I = torch.zeros(N).cuda()
-        self.b_T = torch.zeros(N).cuda()
+        self.s_I = torch.zeros(N).to(self.device)
+        self.s_T = torch.zeros(N).to(self.device)
+        self.b_I = torch.zeros(N).to(self.device)
+        self.b_T = torch.zeros(N).to(self.device)
         self.gamma = gamma
         self.temperature = temperature
         self.eps = 1e-10
@@ -146,19 +153,20 @@ class SogCLR_DRO_Loss(nn.Module):
         #   N is number of samples in training set
         
         super(SogCLR_DRO_Loss, self).__init__()
+        self.device = torch.device('gpu' if torch.cuda.is_available() else 'cpu')
         self.world_size = world_size
         self.gamma_I, self.gamma_T = gamma, gamma
         self.tau_min = tau_min
         self.tau_max = tau_max
         self.tau_init = tau_init
-        self.s_I = torch.zeros(N).cuda()
-        self.s_T = torch.zeros(N).cuda()
-        self.tau_I = torch.ones(N).cuda() * self.tau_init
-        self.tau_T = torch.ones(N).cuda() * self.tau_init
-        self.u_I = torch.zeros(N).cuda()
-        self.u_T = torch.zeros(N).cuda()
-        self.b_I = torch.zeros(N).cuda()
-        self.b_T = torch.zeros(N).cuda()
+        self.s_I = torch.zeros(N).to(self.device)
+        self.s_T = torch.zeros(N).to(self.device)
+        self.tau_I = torch.ones(N).to(self.device) * self.tau_init
+        self.tau_T = torch.ones(N).to(self.device) * self.tau_init
+        self.u_I = torch.zeros(N).to(self.device)
+        self.u_T = torch.zeros(N).to(self.device)
+        self.b_I = torch.zeros(N).to(self.device)
+        self.b_T = torch.zeros(N).to(self.device)
         self.rho_I = rho_init
         self.rho_T = rho_init
         self.eps = eps
@@ -169,7 +177,7 @@ class SogCLR_DRO_Loss(nn.Module):
         self.beta_u = beta_u
         self.batch_size = bsz
         self.grad_clip = 5.0
-        self.mask_neg = (1.0 - torch.eye(bsz)).cuda()
+        self.mask_neg = (1.0 - torch.eye(bsz)).to(self.device)
 
     def forward(self, image_features, text_features, image_ids, text_ids, epoch, max_epoch):
         if self.world_size > 1:
@@ -262,7 +270,7 @@ class CyCLIP_Loss(nn.Module):
 
         self.world_size = world_size
         self.temperature = temperature
-        self.criterion = nn.CrossEntropyLoss().cuda()
+        self.criterion = nn.CrossEntropyLoss().to(self.device)
         self.cylambda_1 = cylambda_1
         self.cylambda_2 = cylambda_2
 
@@ -277,7 +285,7 @@ class CyCLIP_Loss(nn.Module):
         logits_text_per_image = (image_features @ text_features.t()) / self.temperature
         logits_image_per_text = logits_text_per_image.t()
 
-        target = torch.arange(batch_size).long().cuda()
+        target = torch.arange(batch_size).long().to(self.device)
 
         # contrastive loss, the same as CLIP
         contrastive_loss = (self.criterion(logits_text_per_image, target) + self.criterion(logits_image_per_text, target)) / 2.0 
