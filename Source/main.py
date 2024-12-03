@@ -33,7 +33,6 @@ def main(params):
                   vicreg_sim_coeff=params.vicreg_sim_coeff, vicreg_std_coeff=params.vicreg_std_coeff, personalized_tau=params.personalized_tau, 
                   use_temp_net=params.isogclr_temp_net, alpha=params.alpha, distributed=False)
     tokenizer = AutoTokenizer.from_pretrained(params.text_encoder)
-    # TODO: make this work
     optimizer = create_optimizer(params, model)
 
     network = our.CLIP_Network(model, optimizer, tokenizer)
@@ -50,16 +49,23 @@ def main(params):
     train_list_AUROC, test_list_AUROC = [], []
     for epoch in range(params.epochs):
         
-        if(params.is_training)
+        if(params.is_training):
             pass # TODO: do train
 
-        if(params.is_evaluating)
+        if(params.is_evaluating):
             pass # TODO: do eval
 
-        # TODO: print results
-
-        if(params.is_training)
-            pass # TODO: torch save
+        if(params.is_training):
+            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},             
+                             'epoch': epoch,
+                             'data': 'coco',
+                            }
+            with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
+                f.write(json.dumps(log_stats) + "\n")
+            save_obj = {
+                    'model': model_without_ddp.state_dict()
+                }
+            torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_'+str(epoch+1)+'.pth'))
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -85,6 +91,8 @@ class HyperParamsAndArgs():
         self.is_training = True
 
         self.learn_rate = 2e-4
+        self.weight_decay = 0.02
+        self.momentum = 0.09
         self.sogclr_gamma = 0.8
         self.rho_I = 8.0
         self.rho_T = 8.0

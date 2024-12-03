@@ -230,3 +230,15 @@ class CLIP_Network():
         self.network = self.network.cuda()
         self.optimizer = optim
         self.tokenizer = tokenizer
+
+def create_optimizer(params, model):
+    opt_params = model.parameters()
+    weight_decay = params.weight_decay
+
+    if params.optimizer == "adam":
+        optimizer = optim.Adam(parameters)
+    elif params.optimizer == "adamw":
+        optimizer = optim.AdamW(parameters)
+    elif params.optimizer == "sgd":
+        optimizer = optim.SGD(parameters, momentum=params.momentum, nesterov=True)
+    return optimizer
