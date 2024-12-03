@@ -14,101 +14,35 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
-from torch.utils.data import DataLoader, Subset
-from torchvision import transforms, datasets
 
 from our_model import CLIP
-from transformers import AutoTokenizer, RobertaTokenizer
 
-import utils
-import shutil
-
-from tqdm import tqdm
-def train(network, data_loader, parameters, current_epoch):
-    # train
+# Train a CLIP_Network for one epoch
+def train(network, train_loader, parameters, current_epoch, max_epoch=30):
+    # Set to training mode
     network.model.train()
-    
-    metric_logger = utils.MetricLogger(delimiter="  ")
-
-    header = 'Train Epoch: [{}]'.format(current_epoch)
-    print_freq = 50
-    step_size = 100
-    warmup_iterations = parameters.warmup_steps*step_size  
-
-    for i,(image, text, idx, text_idx) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    epoch_loss = 0
+    for images, cap_tokens, indices in enumerate(train_loader):
         
         network.optimizer.zero_grad()
 
-        image = image.cuda()   
-        idx = idx.cuda()
-        text_idx = text_idx.cuda() 
-        text_input = tokenizer(text, padding='max_length', truncation=True, max_length=30, return_tensors="pt").cuda()
+        images = images.cuda()   
+        indices = indices.cuda()
+        cap_tokens = cap_tokens.cuda() 
         
-        # set learning rate for temperature network
-        network.optimizer.param_groups[2]["lr"] = optimizer.param_groups[0]["lr"] / 10.0
+        # set learning rate for temperature network to be 1/10 of the host network's lr
+        network.optimizer.param_groups[2]["lr"] = network.optimizer.param_groups[0]["lr"] / 10.0
 
-        loss_ita, info_dict = network.model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
+        loss_ita = network.model(images, cap_tokens, idx=indices, text_idx=indices, epoch=current_epoch, max_epoch=max_epoch)
+        epoch_loss += loss_ita.item()
         loss_ita.backward()
         network.optimizer.step()
         
-        metric_logger.update(loss_ita=loss_ita.item())
+    if network.scheduler is not None and current_epoch % parameters.step_size == 0: 
+        network.scheduler.step()
 
-        if args.ita_type in ['sogclr_dro', 'isogclr_new']:
-            metric_logger.update(avg_image_tau=info_dict['avg_image_tau'])
-            metric_logger.update(avg_text_tau=info_dict['avg_text_tau'])
-            metric_logger.update(cur_eta=info_dict['cur_eta'])
-            metric_logger.update(grad_tau_image=info_dict['grad_tau_image'])
-            metric_logger.update(grad_tau_text=info_dict['grad_tau_text'])
-            metric_logger.update(b_I=info_dict['b_I'])
-            metric_logger.update(b_T=info_dict['b_T'])
-            metric_logger.update(weights_image_pos=0.0)
-            metric_logger.update(weights_text_pos=0.0)
-            metric_logger.update(v=0.0)
-            metric_logger.update(lamda=0.0)
-        elif args.ita_type == 'isogclr_new_v2':
-            metric_logger.update(avg_image_tau=info_dict['avg_image_tau'])
-            metric_logger.update(avg_text_tau=info_dict['avg_text_tau'])
-            metric_logger.update(cur_eta=info_dict['cur_eta'])
-            metric_logger.update(grad_tau_image=info_dict['grad_tau_image'])
-            metric_logger.update(grad_tau_text=info_dict['grad_tau_text'])
-            metric_logger.update(b_I=info_dict['b_I'])
-            metric_logger.update(b_T=info_dict['b_T'])
-            metric_logger.update(weights_image_pos=0.0)
-            metric_logger.update(weights_text_pos=0.0)
-            metric_logger.update(v=info_dict['v'])
-            metric_logger.update(lamda=info_dict['lamda'])
-        elif args.ita_type == 'sogclr':
-            metric_logger.update(avg_image_tau=info_dict['avg_image_tau'])
-            metric_logger.update(avg_text_tau=info_dict['avg_text_tau'])
-            metric_logger.update(weights_image_pos=0.0)
-            metric_logger.update(weights_text_pos=0.0)
-            metric_logger.update(cur_eta=0.0)
-            metric_logger.update(grad_tau_image=0.0)
-            metric_logger.update(grad_tau_text=0.0)
-            metric_logger.update(b_I=0.0)
-            metric_logger.update(b_T=0.0)
-            metric_logger.update(v=0.0)
-            metric_logger.update(lamda=info_dict['lamda'])
-        else:
-            metric_logger.update(avg_image_tau=info_dict['avg_image_tau'])
-            metric_logger.update(avg_text_tau=info_dict['avg_text_tau'])
-            metric_logger.update(cur_eta=0.0)
-            metric_logger.update(grad_tau_image=0.0)
-            metric_logger.update(grad_tau_text=0.0)
-            metric_logger.update(weights_image_pos=0.0)
-            metric_logger.update(weights_text_pos=0.0)
-            metric_logger.update(b_I=0.0)
-            metric_logger.update(b_T=0.0)
-            metric_logger.update(v=0.0)
-            metric_logger.update(lamda=0.0)
+    return epoch_loss
 
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-        metric_logger.update(lr_temp_net=optimizer.param_groups[2]["lr"])
-        if epoch==0 and i%step_size==0 and i<=warmup_iterations and network.scheduler is not None: 
-            network.scheduler.step(i//step_size)
-
-    print("Averaged stats:", metric_logger.global_avg())     
-    return {k: "{:.3f}".format(meter.global_avg) for k, meter in metric_logger.meters.items()}  
 
 # Top 1 Accuracy on the ImageNet validation set
 @torch.no_grad()

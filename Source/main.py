@@ -2,24 +2,12 @@ import numpy as np
 import random
 import time
 import datetime
-import json
-from pathlib import Path
-
+import os 
 import torch
-import torchvision
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.backends.cudnn as cudnn
-import torch.distributed as dist
-from torch.utils.data import DataLoader, Subset
-from torchvision import transforms, datasets
+from transformers import DistilBertTokenizer
 
-from torch.optim import AdamW, Adam
-from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from data_process import generate_loaders
-from our_model import CLIP, CLIP_Network, create_optimizer
-from losses import SogCLR_Loss
-from transformers import AutoTokenizer
+from our_model import create_optimizer
 
 import pipeline as pipe
 import our_model as our
@@ -37,37 +25,41 @@ def main(params):
                   eta_init=params.eta_init, beta_u=params.beta_u, temp=params.temp, learnable_temp=params.learnable_temp,
                   vicreg_sim_coeff=params.vicreg_sim_coeff, vicreg_std_coeff=params.vicreg_std_coeff, personalized_tau=params.personalized_tau, 
                   use_temp_net=params.isogclr_temp_net, alpha=params.alpha, distributed=False)
-    tokenizer = AutoTokenizer.from_pretrained(params.text_encoder)
     optimizer = create_optimizer(params, model)
-
+    tokenizer = DistilBertTokenizer.from_pretrained(params.text_encoder)
     network = our.CLIP_Network(model, optimizer, tokenizer, params)
     
     print("--Begin training--")
     start_time = time.time()
 
+    # Train CLIP_Network model
     for epoch in range(params.epochs):
-        
-        if(params.is_training):
-            train_stats = pipe.train(network, train_loader, params, epoch)
-
-        if(params.is_evaluating):
-            pass # TODO: do eval
-
-        if(params.is_training):
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},             
-                             'epoch': epoch,
-                             'data': 'coco',
-                            }
-            with open(os.path.join(params.output_dir, "coco_log.txt"),"a") as f:
-                f.write(json.dumps(log_stats) + "\n")
-            save_obj = {
-                    'model': model_without_ddp.state_dict()
-                }
-            torch.save(save_obj, os.path.join(params.output_dir, 'checkpoint_'+str(epoch+1)+'.pth'))
-
+        epoch_loss = pipe.train(network, train_loader, params, epoch)
+        if epoch % params.save_interval == 0:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': network.model.state_dict(),
+                'optimizer_state_dict': network.optimizer.state_dict(),
+                'scheduler_state_dict': network.scheduler.state_dict(),
+                'loss': epoch_loss,
+            }
+            torch.save(checkpoint, os.path.join(params.output_dir, 'checkpoint_'+str(epoch+1)+'.pth'))
+        print(f'Epoch {epoch+1}/{params.epochs}- Loss: {epoch_loss:.4f}')
+    
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+
+    # Start validation
+    print('--Begin validation--')
+    start_time = time.time()
+
+    img_to_text_r1, text_to_img_r1 = pipe.evaluate_image_and_text(model, coco_loader, params.device)
+    zero_shot_acc = pipe.evaluate_top1_classification(model, imagenet_loader, params.device)
+    final_metric = (img_to_text_r1 + text_to_img_r1 + zero_shot_acc) / 3
+    print(f'Results: Img-Text R1: {img_to_text_r1:.4f}, Text-Img R1: {text_to_img_r1:.4f}, Zero-Shot:{zero_shot_acc:.4f}')
+    print(f'Final Metric: {final_metric:.4f}')
+    return final_metric
 
 class HyperParamsAndArgs():
     def __init__(self, **kwargs):
@@ -106,6 +98,9 @@ class HyperParamsAndArgs():
         self.decay_rate = 1
         self.warmup_lr = 1e-5
         self.min_lr = 1e-6
+        self.step_size = 15
+        self.save_interval = 5
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         self.learnable_temp = True
         self.personalized_tau = True

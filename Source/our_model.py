@@ -1,11 +1,9 @@
 """
     Adapted from: https://github.com/zhqiu/contrastive-learning-iSogCLR/blob/main/
 """
-from functools import partial
-
 import timm
-from transformers import DistilBertModel, DistilBertTokenizer
-from losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss
+from transformers import DistilBertModel
+from losses import CyCLIP_Loss, SogCLR_Loss, VICReg_Loss
 
 import torch
 from torch import nn
@@ -37,7 +35,7 @@ class CLIP(nn.Module):
                  vicreg_std_coeff = 25.0,
                  use_temp_net = True,
                  alpha = 1.0,
-                 distributed=True,
+                 distributed=False,
                  ):
         super().__init__()
 
@@ -48,16 +46,18 @@ class CLIP(nn.Module):
             self.image_temp = nn.Parameter(torch.ones(2900000) * self.temp)
             self.text_temp = nn.Parameter(torch.ones(2900000) * self.temp)
     
-        self.visual_encoder = timm.create_model('resnet50', pretrained=True)
-        self.text_encoder = DistilBertModel.from_pretrained("distilbert-base-uncased", attn_implementation="sdpa")
-        self.tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
+        # Encoders specified by project
+        self.visual_encoder = timm.create_model(image_encoder, pretrained=True)
+        self.text_encoder = DistilBertModel.from_pretrained(text_encoder, attn_implementation="sdpa")
 
         # Projection Layers
-        self.text_proj = nn.Linear(self.text_encoder.num_features, embed_dim)
-        self.vision_proj = nn.Linear(self.visual_encoder.num_features, embed_dim)   
+        self.vision_proj = nn.Linear(2048, embed_dim)   
+        self.text_proj = nn.Linear(768, embed_dim)
 
+        # String representation of loss function
         self.ita_type = ita_type
 
+        # Instantiate loss function
         if self.ita_type == 'cyclip':
             self.loss_fn = CyCLIP_Loss(world_size=world_size, temperature=self.temp)
         elif self.ita_type == 'vicreg':
@@ -88,8 +88,7 @@ class CLIP(nn.Module):
         elif self.loss_fn == 'vicreg':
             loss_ita = self.loss_fn(image_embeds, text_embeds)
         elif self.loss_fn == 'sogclr':
-            image_ids, text_ids = idx, text_idx
-            loss_ita, _, _ = self.loss_fn(image_feat, text_feat, image_ids, text_ids, epoch)
+            loss_ita, _, _ = self.loss_fn(image_feat, text_feat, idx, text_idx, epoch)
         else:
             raise NotImplementedError
 
@@ -98,7 +97,7 @@ class CLIP(nn.Module):
 
 class CLIP_Network():
     def __init__(self, model, optim, tokenizer, params, **kwargs):
-        self.model = model
+        self.model = model # Should be an instance of the CLIP class
         self.model = self.model.cuda()
         self.optimizer = optim
         self.tokenizer = tokenizer
