@@ -72,7 +72,7 @@ class SogCLR_Loss(nn.Module):
            N is number of samples in training set
         """
         super(SogCLR_Loss, self).__init__()
-        self.device = torch.device('gpu' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.world_size = world_size
         self.s_I = torch.zeros(N).to(self.device)
         self.s_T = torch.zeros(N).to(self.device)
@@ -153,7 +153,7 @@ class SogCLR_DRO_Loss(nn.Module):
         #   N is number of samples in training set
         
         super(SogCLR_DRO_Loss, self).__init__()
-        self.device = torch.device('gpu' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.world_size = world_size
         self.gamma_I, self.gamma_T = gamma, gamma
         self.tau_min = tau_min

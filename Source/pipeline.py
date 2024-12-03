@@ -17,57 +17,39 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms, datasets
 
-from models.model_clip import CLIP
+from our_model import CLIP
 from transformers import AutoTokenizer, RobertaTokenizer
 
 import utils
 import shutil
-from dataset import create_train_dataset, create_val_dataset, create_sampler, create_train_loader, create_val_loader
-from scheduler import create_scheduler
-from optim import create_optimizer
-from zeroshot_transfer.classes import CIFAR10_CLASSES, CIFAR100_CLASSES, IMAGENET_CLASSES
 
 from tqdm import tqdm
-# optimizer, tokenizer, epoch, max_epoch, warmup_steps, device, scheduler, args
 def train(network, data_loader, parameters, current_epoch):
     # train
-    model.train()
+    network.model.train()
     
     metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    metric_logger.add_meter('lr_temp_net', utils.SmoothedValue(window_size=1, fmt='{value:.8f}'))
-    metric_logger.add_meter('loss_ita', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('avg_image_tau', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('avg_text_tau', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('cur_eta', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('grad_tau_image', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('grad_tau_text', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('b_I', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('b_T', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('v', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('lamda', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('weights_image_pos', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('weights_text_pos', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
 
-    header = 'Train Epoch: [{}]'.format(epoch)
+    header = 'Train Epoch: [{}]'.format(current_epoch)
     print_freq = 50
     step_size = 100
-    warmup_iterations = warmup_steps*step_size  
+    warmup_iterations = parameters.warmup_steps*step_size  
 
     for i,(image, text, idx, text_idx) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        optimizer.zero_grad()
+        
+        network.optimizer.zero_grad()
 
-        image = image.to(device, non_blocking=True)   
-        idx = idx.to(device, non_blocking=True)
-        text_idx = text_idx.to(device, non_blocking=True)   
-        text_input = tokenizer(text, padding='max_length', truncation=True, max_length=30, return_tensors="pt").to(device)
+        image = image.cuda()   
+        idx = idx.cuda()
+        text_idx = text_idx.cuda() 
+        text_input = tokenizer(text, padding='max_length', truncation=True, max_length=30, return_tensors="pt").cuda()
         
         # set learning rate for temperature network
-        optimizer.param_groups[2]["lr"] = optimizer.param_groups[0]["lr"] / 10.0
+        network.optimizer.param_groups[2]["lr"] = optimizer.param_groups[0]["lr"] / 10.0
 
-        loss_ita, info_dict = model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
+        loss_ita, info_dict = network.model(image, text_input, idx=idx, text_idx=text_idx, epoch=epoch, max_epoch=max_epoch)
         loss_ita.backward()
-        optimizer.step()
+        network.optimizer.step()
         
         metric_logger.update(loss_ita=loss_ita.item())
 
@@ -122,11 +104,9 @@ def train(network, data_loader, parameters, current_epoch):
 
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(lr_temp_net=optimizer.param_groups[2]["lr"])
-        if epoch==0 and i%step_size==0 and i<=warmup_iterations and scheduler is not None: 
-            scheduler.step(i//step_size)
+        if epoch==0 and i%step_size==0 and i<=warmup_iterations and network.scheduler is not None: 
+            network.scheduler.step(i//step_size)
 
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger.global_avg())     
     return {k: "{:.3f}".format(meter.global_avg) for k, meter in metric_logger.meters.items()}  
 
@@ -175,7 +155,7 @@ def create_zeroshot_dataloader(dataset_name, data_folder, image_size):
 
 @torch.no_grad()
 def zeroshot_transfer(model, data_loader, dataset_name, tokenizer, device):
-    model.eval()
+    network.model.eval()
 
     if dataset_name == 'cifar10':
         config = CIFAR10_CLASSES

@@ -155,22 +155,22 @@ def collate_fn_with_index(batch, image_transform, tokenizer):
 # Create DataLoader objects for the three datasets
 def generate_loaders(parameters):
     CC3M_CAPTION_FILE = '../clip_train/cc3m_train_subset.json'
-    CC3M_IMG_ROOT = '../Datasets/cc3m_subset_100k'
+    CC3M_IMG_ROOT = '../datasets/cc3m_subset_100k'
     train = CC3MDataset(CC3M_CAPTION_FILE, CC3M_IMG_ROOT)
 
-    COCO_CAPTION_FILE = '../Datasets/mscoco_val/filtered_captions_val2014.json'
-    COCO_IMG_ROOT = '../Datasets/mscoco_val/mscoco_val2014_subset_5k'
+    COCO_CAPTION_FILE = '../datasets/mscoco_val/captions_val2014.json'
+    COCO_IMG_ROOT = '../datasets/mscoco_val/mscoco_val2014_subset_5k'
     coco_valid = MSCOCODataset(COCO_CAPTION_FILE, COCO_IMG_ROOT)
 
     # NOTE: Run the shell script within imagenet first to get the val100 folder
-    IMAGENET_IMG_ROOT = '../Datasets/imagenet/val100'
-    IMAGENET_CAPTION_FILE = '../Datasets/imagenet/imagenet_class_index.json'
+    IMAGENET_IMG_ROOT = '../datasets/imagenet/val'
+    IMAGENET_CAPTION_FILE = '../datasets/imagenet/imagenet_class_index.json'
     imagenet_valid = ImageNetDataset(IMAGENET_IMG_ROOT, IMAGENET_CAPTION_FILE)
 
     # NOTE: I'm assuming we want this consistent across datasets
     tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
 
-    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=lambda batch: collate_fn_with_index(batch, train.transform, tokenizer))
+    train_loader = DataLoader(train, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=collate_fn_with_index(batch, train.transform, tokenizer))
     coco_loader = DataLoader(coco_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=lambda batch: collate_fn(batch, coco_valid.transform, tokenizer))
     # No captions, use torch's default collate_fn
     imagenet_loader = DataLoader(imagenet_valid, batch_size=parameters.batch_size, shuffle=False, num_workers=2, pin_memory=True)

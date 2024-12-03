@@ -6,12 +6,13 @@ from functools import partial
 import timm
 from transformers import AutoModel, RobertaModel
 
-from models.losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss
-from models.losses import iSogCLR_New_v2_Loss, iSogCLR_New_v1_Loss, onlineCLR_Loss, iSogCLR_New_Loss
+from losses import CLIP_Loss, CyCLIP_Loss, SogCLR_Loss, VICReg_Loss
 
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch import optim as optim
+from cosine_lr import CosineLRScheduler
 
 class CLIP(nn.Module):
     def __init__(self,               
@@ -84,20 +85,7 @@ class CLIP(nn.Module):
             self.criterion = VICReg_Loss(world_size=world_size, dim_size=embed_dim, sim_coeff=vicreg_sim_coeff, std_coeff=vicreg_std_coeff)
 
         elif self.ita_type == 'sogclr':
-            self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp, bsz=bsz)
-
-        elif self.ita_type == 'isogclr_new_v2':
-            self.criterion = iSogCLR_New_v2_Loss(world_size=world_size, gamma=sogclr_gamma, rho_init=rho_init, tau_init=tau_init, bsz=bsz,
-                                                 eta_init=eta_init, beta_u=beta_u)
-        elif self.ita_type == 'isogclr_new_v1':
-            self.criterion = iSogCLR_New_v1_Loss(world_size=world_size, gamma=sogclr_gamma, rho_init=rho_init, bsz=bsz)
-        
-        elif self.ita_type == 'onlineclr':
-            self.criterion = onlineCLR_Loss(world_size=world_size, temperature=self.temp, gamma=sogclr_gamma)
-
-        elif self.ita_type == 'isogclr_new':
-            self.criterion = iSogCLR_New_Loss(world_size=world_size, gamma=sogclr_gamma, rho_I=rho_I, rho_T=rho_T, tau_init=tau_init, bsz=bsz,
-                                              use_temp_net=use_temp_net, feature_dim=embed_dim)
+            self.criterion = SogCLR_Loss(world_size=world_size, gamma=sogclr_gamma, temperature=self.temp)
         else:
             raise NotImplementedError
 
@@ -223,20 +211,35 @@ def concat_all_gather(tensor):
     return output
 
 class CLIP_Network():
-    def __init__(self, model, optim, tokenizer, **kwargs):
-        self.network = model
-        self.network = self.network.cuda()
+    def __init__(self, model, optim, tokenizer, params, **kwargs):
+        self.model = model
+        self.model = self.model.cuda()
         self.optimizer = optim
         self.tokenizer = tokenizer
+        self.scheduler = CosineLRScheduler(
+            self.optimizer,
+            t_initial=params.epochs,
+            t_mul=1.0,
+            lr_min=params.min_lr,
+            decay_rate=params.decay_rate,
+            warmup_lr_init=params.warmup_lr,
+            warmup_t=params.warmup_steps,
+            cycle_limit=1,
+            t_in_epochs=True,
+            noise_range_t=None,
+            noise_pct=0.67,
+            noise_std=1.0,
+            noise_seed=params.seed,
+        )
 
 def create_optimizer(params, model):
     opt_params = model.parameters()
     weight_decay = params.weight_decay
 
     if params.optimizer == "adam":
-        optimizer = optim.Adam(parameters)
+        optimizer = optim.Adam(opt_params)
     elif params.optimizer == "adamw":
-        optimizer = optim.AdamW(parameters)
+        optimizer = optim.AdamW(opt_params)
     elif params.optimizer == "sgd":
-        optimizer = optim.SGD(parameters, momentum=params.momentum, nesterov=True)
+        optimizer = optim.SGD(opt_params, momentum=params.momentum, nesterov=True)
     return optimizer

@@ -17,8 +17,9 @@ from torchvision import transforms, datasets
 from torch.optim import AdamW, Adam
 from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from data_process import generate_loaders
-from our_model import CLIP_Model
+from our_model import CLIP, CLIP_Network, create_optimizer
 from losses import SogCLR_Loss
+from transformers import AutoTokenizer
 
 import pipeline as pipe
 import our_model as our
@@ -39,22 +40,15 @@ def main(params):
     tokenizer = AutoTokenizer.from_pretrained(params.text_encoder)
     optimizer = create_optimizer(params, model)
 
-    network = our.CLIP_Network(model, optimizer, tokenizer)
-    
+    network = our.CLIP_Network(model, optimizer, tokenizer, params)
     
     print("--Begin training--")
     start_time = time.time()
 
-    train_log = []
-    test_log = []
-
-    test_best = 0
-    train_list_AUPRC, test_list_AUPRC = [], []
-    train_list_AUROC, test_list_AUROC = [], []
     for epoch in range(params.epochs):
         
         if(params.is_training):
-            pass # TODO: do train
+            train_stats = pipe.train(network, train_loader, params, epoch)
 
         if(params.is_evaluating):
             pass # TODO: do eval
@@ -64,12 +58,12 @@ def main(params):
                              'epoch': epoch,
                              'data': 'coco',
                             }
-            with open(os.path.join(args.output_dir, "coco_log.txt"),"a") as f:
+            with open(os.path.join(params.output_dir, "coco_log.txt"),"a") as f:
                 f.write(json.dumps(log_stats) + "\n")
             save_obj = {
                     'model': model_without_ddp.state_dict()
                 }
-            torch.save(save_obj, os.path.join(args.output_dir, 'checkpoint_'+str(epoch+1)+'.pth'))
+            torch.save(save_obj, os.path.join(params.output_dir, 'checkpoint_'+str(epoch+1)+'.pth'))
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -88,11 +82,12 @@ class HyperParamsAndArgs():
         # Anything below may be modified
         
         self.loss_type = "sogclr"
-        self.optimizer = "adamW"
+        self.optimizer = "adamw"
         self.schedular = "cosine"
 
         self.is_evaluating = False
         self.is_training = True
+        self.warmup_steps = 2
         
         self.learn_rate = 2e-4
         self.weight_decay = 0.02
@@ -108,6 +103,9 @@ class HyperParamsAndArgs():
         self.vicreg_std_coeff = 25.0
         self.alpha = 1.0
         self.embed_dim = 256
+        self.decay_rate = 1
+        self.warmup_lr = 1e-5
+        self.min_lr = 1e-6
 
         self.learnable_temp = True
         self.personalized_tau = True
